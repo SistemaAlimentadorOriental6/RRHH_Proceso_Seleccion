@@ -1,0 +1,12 @@
+# Secretos y entorno local
+.env
+
+# Perfil de Chrome (cookies/sesión de Computrabajo) y binarios
+perfil_computrabajo*/
+perfil_adres/
+*.exe
+*.exe~
+
+# Datos generados por el scraper (hojas de vida, candidatos, rankings)
+descargas/
+.firecrawl/

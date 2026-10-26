@@ -1,0 +1,112 @@
+:root {
+  /* Variables base en RGB para transparencias dinámicas según DESING.md */
+  --vs-primary-raw: 76, 194, 83;
+  --color-primario: rgb(var(--vs-primary-raw));
+  --color-primario-hover: rgb(62, 178, 69);
+
+  /* Fondos sutiles (DESING.md) */
+  --color-fondo-app: #ffffff;
+  --color-fondo-soft: #f4f7f8;
+
+  /* Tipografía (DESING.md) */
+  --color-texto-dark: #2c3e50;
+  --color-texto-navy: #1e293b;
+  --color-texto-grey: #a0a6ae;
+
+  /* Radios y transiciones (Estética Vuesax) */
+  --radio-input: 14px;
+  --radio-boton: 14px;
+  --radio-modal: 28px;
+  --transicion-vuesax: all 0.25s ease;
+  --curva-elastica: cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body,
+#app {
+  width: 100%;
+  min-height: 100vh;
+  background-color: var(--color-fondo-app);
+  color: var(--color-texto-dark);
+  font-family: 'Poppins', 'Inter', system-ui, -apple-system, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+input,
+button {
+  font-family: inherit;
+  border: none;
+  outline: none;
+  background: none;
+}
+
+/* 1. Campos de Entrada (Inputs Premium - DESING.md) */
+.input-premium {
+  background: var(--color-fondo-soft);
+  border: 2px solid transparent;
+  border-radius: var(--radio-input);
+  transition: var(--transicion-vuesax);
+}
+
+.input-premium:focus-within {
+  background: #ffffff;
+  border-color: var(--color-primario);
+  box-shadow: 0px 5px 20px 0px rgba(var(--vs-primary-raw), 0.15);
+}
+
+.input-premium.input-con-error {
+  border-color: rgba(239, 68, 68, 0.5);
+  box-shadow: 0px 5px 20px 0px rgba(239, 68, 68, 0.08);
+}
+
+/* 2. Botones con "Glow" (DESING.md) */
+.boton-premium {
+  background: var(--color-primario);
+  color: #ffffff;
+  border-radius: var(--radio-boton);
+  box-shadow: 0px 10px 20px -10px rgba(var(--vs-primary-raw), 0.5);
+  transition: var(--transicion-vuesax);
+  cursor: pointer;
+  user-select: none;
+}
+
+.boton-premium:hover:not(:disabled) {
+  background: var(--color-primario-hover);
+  box-shadow: 0px 10px 20px -5px rgba(var(--vs-primary-raw), 0.5);
+}
+
+.boton-premium:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* 3. Modales (sin desenfoque de fondo) */
+.modal-overlay {
+  backdrop-filter: none;
+  background: rgba(0, 0, 0, 0.4);
+}
+
+.modal-content {
+  border-radius: var(--radio-modal);
+  animation: modalIn 0.4s var(--curva-elastica);
+}
+
+@keyframes modalIn {
+  from {
+    opacity: 0;
+    transform: scale(0.88) translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}

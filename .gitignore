@@ -1,0 +1,21 @@
+# Perfiles de navegador y sesiones
+perfil_*/
+
+# Archivos de entorno y credenciales sensibles
+.env
+*.env
+go-rrhh/.env
+
+# Binarios y ejecutables compilados
+bin/*.exe
+*.exe
+*.exe~
+
+# Descargas generadas y temporales
+descargas/
+.firecrawl/
+
+# Dependencias de frontend
+frontend/node_modules/
+frontend/.svelte-kit/
+frontend/build/
