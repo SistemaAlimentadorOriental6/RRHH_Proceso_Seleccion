@@ -31,7 +31,10 @@ func NuevoAgenteAdres(cfg *configuracion.Configuracion) *AgenteAdres {
 	// Sin servidor gráfico (Linux sin DISPLAY) Chrome visible no arranca: se usa headless.
 	// shortcut: reCAPTCHA puede rechazar headless; si pasa, correr con `xvfb-run` y DISPLAY queda definido.
 	sinPantalla := runtime.GOOS == "linux" && os.Getenv("DISPLAY") == ""
+	// ADRES sirve la cadena de certificados incompleta; el Linux del servidor no la completa como Windows.
+	// Solo afecta a este agente (consulta pública, sin credenciales).
 	opts := opcionesChrome(sinPantalla,
+		chromedp.Flag("ignore-certificate-errors", true),
 		chromedp.Flag("window-position", "-2000,-2000"),
 		chromedp.Flag("window-size", "800,600"),
 		chromedp.UserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"),
