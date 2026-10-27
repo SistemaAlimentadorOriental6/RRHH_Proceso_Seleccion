@@ -3,7 +3,9 @@ package agentes
 import (
 	"context"
 	"fmt"
+	"os"
 	"regexp"
+	"runtime"
 	"strings"
 	"time"
 
@@ -26,7 +28,10 @@ type AgenteAdres struct {
 // NuevoAgenteAdres inicializa el agente de validación de EPS.
 func NuevoAgenteAdres(cfg *configuracion.Configuracion) *AgenteAdres {
 	// Chrome VISIBLE para ADRES: reCAPTCHA Enterprise invisible requiere browser real
-	opts := opcionesChrome(false,
+	// Sin servidor gráfico (Linux sin DISPLAY) Chrome visible no arranca: se usa headless.
+	// shortcut: reCAPTCHA puede rechazar headless; si pasa, correr con `xvfb-run` y DISPLAY queda definido.
+	sinPantalla := runtime.GOOS == "linux" && os.Getenv("DISPLAY") == ""
+	opts := opcionesChrome(sinPantalla,
 		chromedp.Flag("window-position", "-2000,-2000"),
 		chromedp.Flag("window-size", "800,600"),
 		chromedp.UserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"),
