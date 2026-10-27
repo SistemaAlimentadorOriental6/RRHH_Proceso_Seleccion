@@ -18,6 +18,7 @@ var origenesPorDefecto = []string{
 	"http://localhost:5173", "http://127.0.0.1:5173",
 	"http://localhost:4173", "http://127.0.0.1:4173",
 	"http://localhost:8080", "http://127.0.0.1:8080",
+	"http://192.168.90.25:3001", "http://192.168.90.25:3002",
 }
 
 func origenesPermitidos() map[string]struct{} {
