@@ -4,7 +4,7 @@
   import { fade, fly, slide } from "svelte/transition";
   import { cubicInOut, cubicOut } from "svelte/easing";
   import { SvelteSet } from "svelte/reactivity";
-  import { destinoDescartados, llevarTarjeta } from "../servicios/descarteAnimado.svelte";
+  import { despachados, destinoDescartados, llevarTarjeta } from "../servicios/descarteAnimado.svelte";
   import { HugeiconsIcon } from "@hugeicons/svelte";
   import {
     Briefcase01Icon,
@@ -56,6 +56,26 @@
   }: Propiedades = $props();
 
   let textoBusqueda = $state("");
+
+  const ETIQUETA_CONEXION = {
+    conectando: "Conectando…",
+    en_vivo: "En vivo",
+    reconectando: "Reconectando…",
+    pausada: "En pausa",
+  } as const;
+
+  // Reloj para "hace X min": basta con avanzar cada 30 s.
+  let ahora = $state(Date.now());
+  $effect(() => {
+    const t = setInterval(() => (ahora = Date.now()), 30_000);
+    return () => clearInterval(t);
+  });
+  function haceCuanto(momento: number): string {
+    const minutos = Math.floor((ahora - momento) / 60_000);
+    if (minutos < 1) return "actualizada hace un momento";
+    if (minutos < 60) return `actualizada hace ${minutos} min`;
+    return `actualizada hace ${Math.floor(minutos / 60)} h`;
+  }
   /** 0 = analiza a todos los postulados (nada en la pantalla lo cambia). */
   const limiteAnalisis = 0;
 
@@ -146,7 +166,9 @@
   // Quien termina en vivo se queda un momento en "Por verificar" y Adi se lo lleva, sin prisa y de a
   // uno: a Descartados si fue rechazado, a su lugar en Analizados si no. Los que ya estaban rechazados
   // al abrir la pantalla simplemente no aparecen aquí (están en Descartados).
-  const despachados = new SvelteSet<string>();
+  // (la lista `despachados` vive en descarteAnimado: sobrevive a salir y volver a esta pantalla)
+  /** Más allá de esto una tarjeta terminada ya no se lleva con animación: se acomoda directamente. */
+  const MAX_ANTIGUEDAD_LLEVAR_MS = 20_000;
   /** Aptos y pendientes que Adi aún está trayendo: su tarjeta real ya existe en Analizados, pero oculta. */
   const enCamino = new SvelteSet<string>();
   const ESPERA_ANTES_DE_LLEVAR_MS = 1500;
@@ -189,6 +211,10 @@
   $effect(() => {
     for (const c of sesionActiva?.candidatos ?? []) {
       if (!esperaTurno(c) || programados.has(c.slug)) continue;
+      if (Date.now() - (c.terminadoEn as number) > MAX_ANTIGUEDAD_LLEVAR_MS) {
+        despachados.add(c.slug); // terminó hace rato (p. ej. mientras estaba en otra pantalla)
+        continue;
+      }
       programados.add(c.slug);
       const espera = Math.max(0, (c.terminadoEn as number) + ESPERA_ANTES_DE_LLEVAR_MS - Date.now());
       setTimeout(() => llevar(c.slug), espera);
@@ -272,16 +298,16 @@
       void sesionActiva.cargarGuardados();
   });
 
-  // Las tarjetas muestran el resumen de cada vacante: se leen sus candidatos guardados.
-  $effect(() => {
-    if (almacenRrhh.vacantes.length === 0) return;
-    for (const v of vacantesVisibles) void almacenRrhh.sesion(v.id).cargarGuardados();
-  });
-
-  function resumenVacante(sesion: ReturnType<typeof almacenRrhh.sesion>) {
-    const veredictos = sesion.candidatos
-      .filter((c) => c.fase === "completo")
-      .map(veredictoDe);
+  // Las tarjetas del listado toman sus totales de la lista de vacantes (los calcula la base): ya no se
+  // cargan todos los candidatos de cada vacante solo para contarlos. Si la sesión ya tiene a sus
+  // candidatos (vacante abierta o análisis en vivo), se cuentan ahí, que está más al día.
+  function resumenVacante(vacante: VacanteApi, sesion: ReturnType<typeof almacenRrhh.sesion>) {
+    const completos = sesion.candidatos.filter((c) => c.fase === "completo");
+    if (completos.length === 0 && vacante.resumen) {
+      const r = vacante.resumen;
+      return { postulados: r.postulados, aceptados: r.aptos, rechazados: r.no_aptos, pendientes: r.pendientes };
+    }
+    const veredictos = completos.map(veredictoDe);
     return {
       postulados: veredictos.length,
       aceptados: veredictos.filter((v) => v === "apto").length,
@@ -300,6 +326,33 @@
     candidatosVisibles.filter(enCola).sort((a, b) => claveCola(a) - claveCola(b) || a.indice - b.indice),
   );
   const candidatosResultados = $derived(candidatosVisibles.filter((c) => !enCola(c)));
+
+  // "Analizados" se pinta por tandas: cientos de tarjetas a la vez (cada una con sus etapas y animaciones)
+  // volvían lenta la pantalla. Los que terminan en vivo salen arriba, así que siempre quedan a la vista.
+  const TANDA_RESULTADOS = 60;
+  let limiteResultados = $state(TANDA_RESULTADOS);
+  $effect(() => {
+    void idVacanteFiltrada;
+    void textoBusqueda;
+    void orden;
+    limiteResultados = TANDA_RESULTADOS; // otra vacante, búsqueda u orden: se vuelve a la primera tanda
+  });
+  const resultadosVisibles = $derived(candidatosResultados.slice(0, limiteResultados));
+
+  // Reacomodar con animación sirve con pocas tarjetas; con muchas, medir y mover todas cada vez que
+  // alguien termina daba tirones (y el avatar mide la pantalla en cada cuadro). Ahí se acomodan sin más.
+  const MAX_TARJETAS_ANIMADAS = 40;
+  const sinMovimiento = typeof matchMedia !== "undefined" && matchMedia("(prefers-reduced-motion: reduce)").matches;
+  function acomodar(nodo: Element, rects: { from: DOMRect; to: DOMRect }, parametros?: Parameters<typeof flip>[2]) {
+    if (sinMovimiento || candidatosCola.length + resultadosVisibles.length > MAX_TARJETAS_ANIMADAS) return { duration: 0 };
+    return flip(nodo, rects, parametros);
+  }
+
+  // Un solo Adi en la lista: en la vacante que se analiza o, si ninguna, en la primera. Antes cada tarjeta
+  // tenía el suyo, cada uno con su bucle de animación midiendo la pantalla.
+  const idConAvatar = $derived(
+    (vacantesVisibles.find((v) => almacenRrhh.sesion(v.id).activo) ?? vacantesVisibles[0])?.id ?? null,
+  );
 
   // Fila de espera con scroll cuidado: bordes que se desvanecen donde hay más contenido, flechas
   // para recorrerla y vuelta al inicio cuando cambia quién va primero (el que se analiza).
@@ -364,6 +417,29 @@
           <HugeiconsIcon icon={Briefcase01Icon} size={13} strokeWidth={2.2} />
           <span>Computrabajo en vivo</span>
         </span>
+        <span
+          class="estado-conexion conexion-{almacenRrhh.conexion}"
+          role="status"
+          title="Conexión con el servidor: los cambios llegan solos mientras diga «En vivo»"
+        >
+          <span class="punto-conexion" aria-hidden="true"></span>
+          {ETIQUETA_CONEXION[almacenRrhh.conexion]}
+        </span>
+        {#if almacenRrhh.listaLeidaEn !== null}
+          <span class="edad-lista">
+            {almacenRrhh.contando ? "Actualizando inscritos…" : `Lista ${haceCuanto(almacenRrhh.listaLeidaEn)}`}
+          </span>
+          <button
+            type="button"
+            class="boton-actualizar"
+            disabled={almacenRrhh.contando || almacenRrhh.cargando}
+            title="Volver a leer las vacantes y sus inscritos en Computrabajo"
+            onclick={() => almacenRrhh.cargarVacantes(true)}
+          >
+            <HugeiconsIcon icon={ReloadIcon} size={12} strokeWidth={2.2} />
+            <span>Actualizar</span>
+          </button>
+        {/if}
         {#if idVacanteFiltrada}
           <button
             type="button"
@@ -441,7 +517,7 @@
       <button
         type="button"
         class="boton-secundario"
-        onclick={() => almacenRrhh.cargarVacantes()}
+        onclick={() => almacenRrhh.cargarVacantes(true)}
       >
         <HugeiconsIcon icon={ReloadIcon} size={14} strokeWidth={2} />
         <span>Reintentar</span>
@@ -458,8 +534,8 @@
     <div class="estado-vacio" aria-busy="true">
       <span class="spinner"></span>
       <p>
-        Leyendo las vacantes activas en Computrabajo… la primera vez puede
-        tardar mientras abre la sesión.
+        Leyendo las vacantes activas en Computrabajo… solo la primera vez
+        tarda: después la lista sale al instante y se actualiza sola.
       </p>
     </div>
   {:else if idVacanteFiltrada && !vacanteActiva && almacenRrhh.vacantes.length > 0}
@@ -489,7 +565,9 @@
       {@const sesion = almacenRrhh.sesion(vacante.id)}
       <article class="tarjeta-vacante">
         <div class="cabecera-vacante">
-          <AvatarAnalisis {sesion} />
+          {#if vacante.id === idConAvatar}
+            <AvatarAnalisis {sesion} />
+          {/if}
           <div class="info-vacante">
             <div class="fila-chips">
               {#if vacante.origen === "correo"}
@@ -556,7 +634,7 @@
                   >
                 {/if}
               </span>
-              {#if sesion.candidatos.length > 0}
+              {#if resumenVacante(vacante, sesion).postulados > 0}
                 <span class="meta-item">
                   <HugeiconsIcon
                     icon={CheckmarkCircle02Icon}
@@ -564,7 +642,7 @@
                     strokeWidth={2}
                   />
                   <span
-                    ><strong>{sesion.candidatos.length}</strong> con resultado</span
+                    ><strong>{resumenVacante(vacante, sesion).postulados}</strong> con resultado</span
                   >
                 </span>
               {/if}
@@ -610,7 +688,7 @@
                 </button>
               {/if}
             {/if}
-            {#if resumenVacante(sesion).aceptados > 0}
+            {#if resumenVacante(vacante, sesion).aceptados > 0}
               <button
                 type="button"
                 class="boton-secundario"
@@ -624,8 +702,8 @@
           </div>
         </div>
 
-        {#if sesion.candidatos.length > 0}
-          {@const r = resumenVacante(sesion)}
+        {#if resumenVacante(vacante, sesion).postulados > 0}
+          {@const r = resumenVacante(vacante, sesion)}
           <div class="resumen-vacante">
             <div class="fila-cifras">
               <div class="cifra"><strong>{r.postulados}</strong><span>Postulados</span></div>
@@ -701,6 +779,10 @@
               <span class="spinner"></span>
               <p>Leyendo los candidatos guardados…</p>
             </div>
+          {:else if sesion.candidatos.length === 0 && sesion.errorCarga}
+            <div class="estado-vacio" role="alert">
+              <p>No se pudieron leer los candidatos guardados: {sesion.errorCarga}. Reintentando…</p>
+            </div>
           {:else if sesion.candidatos.length === 0}
             <div class="estado-vacio">
               <p>
@@ -721,7 +803,7 @@
                   <span class="etiqueta-orden">#{candidato.indice}</span>
                 </div>
                 <div class="cabecera-persona">
-                  <img class="avatar" src={candidato.fotoUrl} alt={candidato.nombre} loading="lazy" />
+                  <img class="avatar" src={candidato.fotoUrl} alt={candidato.nombre} width="50" height="50" loading="lazy" decoding="async" />
                   <div class="identidad">
                     <h4 title={candidato.nombre.toUpperCase()}>{candidato.nombre.toUpperCase()}</h4>
                     <span class="esqueleto esq-linea esq-corta"></span>
@@ -786,7 +868,10 @@
                       class="avatar"
                       src={candidato.fotoUrl}
                       alt={candidato.nombre}
+                      width="50"
+                      height="50"
                       loading="lazy"
+                      decoding="async"
                     />
                     <div class="identidad">
                       <h4 title={candidato.nombre.toUpperCase()}>
@@ -933,8 +1018,8 @@
                   class:recien-apto={enReposo(candidato) && veredictoDe(candidato) === "apto"}
                   class:recien-no-apto={enReposo(candidato) && veredictoDe(candidato) === "no_apto"}
                   class:recien-pendiente={enReposo(candidato) && veredictoDe(candidato) === "pendiente"}
-                  animate:flip={{ duration: 900, easing: cubicInOut }}
-                  in:fly={{ y: 24, duration: 450, easing: cubicOut }}
+                  animate:acomodar={{ duration: 600, easing: cubicInOut }}
+                  in:fly={{ y: 24, duration: 350, easing: cubicOut }}
                   out:fade={{ duration: 120 }}
                 >
                   {@render cuerpoTarjeta(candidato, vacante)}
@@ -953,7 +1038,7 @@
                 <h4>Analizados <span class="contador-seccion">{candidatosResultados.length}</span></h4>
               </div>
               <div class="grilla-candidatos">
-                {#each candidatosResultados as candidato (candidato.slug)}
+                {#each resultadosVisibles as candidato (candidato.slug)}
                 <div
                   data-slug={candidato.slug}
                   data-fase={candidato.fase}
@@ -965,14 +1050,23 @@
                   class:recien-apto={enReposo(candidato) && veredictoDe(candidato) === "apto"}
                   class:recien-no-apto={enReposo(candidato) && veredictoDe(candidato) === "no_apto"}
                   class:recien-pendiente={enReposo(candidato) && veredictoDe(candidato) === "pendiente"}
-                  animate:flip={{ duration: 900, easing: cubicInOut }}
-                  in:fly={{ y: 24, duration: 450, easing: cubicOut }}
+                  animate:acomodar={{ duration: 600, easing: cubicInOut }}
+                  in:fly={{ y: 24, duration: 350, easing: cubicOut }}
                   out:fade={{ duration: 120 }}
                 >
                   {@render cuerpoTarjeta(candidato, vacante)}
                 </div>
                 {/each}
               </div>
+              {#if candidatosResultados.length > resultadosVisibles.length}
+                <button
+                  type="button"
+                  class="boton-secundario ver-mas"
+                  onclick={() => (limiteResultados += TANDA_RESULTADOS)}
+                >
+                  Ver más ({candidatosResultados.length - resultadosVisibles.length} restantes)
+                </button>
+              {/if}
             </section>
           {/if}
         {/if}
@@ -982,6 +1076,72 @@
 </div>
 
 <style>
+  .estado-conexion,
+  .edad-lista,
+  .boton-actualizar {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: #5c6b7a;
+  }
+
+  .estado-conexion {
+    padding: 3px 10px;
+    border-radius: 999px;
+    background: #f1f4f7;
+    font-weight: 600;
+  }
+
+  .punto-conexion {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #9aa5b1;
+  }
+
+  .conexion-en_vivo {
+    background: #e8f8ea;
+    color: #1f7a2e;
+  }
+
+  .conexion-en_vivo .punto-conexion {
+    background: #2fb344;
+    box-shadow: 0 0 0 3px rgba(47, 179, 68, 0.2);
+  }
+
+  .conexion-reconectando {
+    background: #fff4e0;
+    color: #8a5a00;
+  }
+
+  .conexion-reconectando .punto-conexion {
+    background: #f0a020;
+  }
+
+  .boton-actualizar {
+    border: none;
+    background: none;
+    padding: 3px 6px;
+    border-radius: 8px;
+    cursor: pointer;
+  }
+
+  .boton-actualizar:hover:not(:disabled) {
+    background: #f1f4f7;
+    color: #2c3e50;
+  }
+
+  .boton-actualizar:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+
+  .ver-mas {
+    display: flex;
+    margin: 14px auto 0;
+  }
+
   .contenedor-vacantes {
     padding: 26px 32px 42px;
     display: flex;

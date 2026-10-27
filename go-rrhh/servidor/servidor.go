@@ -5,6 +5,10 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"path"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"go-rrhh/configuracion"
@@ -16,6 +20,22 @@ type ServidorWeb struct {
 	puerto       int
 	controlador  *ControladorRRHH
 	servidorHTTP *http.Server
+	// frontend es la carpeta con el frontend compilado (pnpm build → frontend/dist). Vacía: solo API.
+	frontend string
+}
+
+// carpetaFrontend elige el frontend compilado a servir: RRHH_FRONTEND_DIR, o ../frontend/dist si existe
+// (el servidor se suele arrancar desde go-rrhh/). Servirlo desde aquí evita el servidor de desarrollo de
+// Vite, que pide decenas de módulos por recarga y comparte con ellos las 6 conexiones del navegador.
+func carpetaFrontend() string {
+	dir := strings.TrimSpace(os.Getenv("RRHH_FRONTEND_DIR"))
+	if dir == "" {
+		dir = filepath.Join("..", "frontend", "dist")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "index.html")); err != nil {
+		return ""
+	}
+	return dir
 }
 
 // NuevoServidorWeb crea e inicializa el servidor HTTP.
@@ -30,6 +50,7 @@ func NuevoServidorWeb(cfg *configuracion.Configuracion, puerto int, modeloIA str
 	return &ServidorWeb{
 		puerto:      puerto,
 		controlador: controlador,
+		frontend:    carpetaFrontend(),
 	}
 }
 
@@ -98,13 +119,45 @@ func (s *ServidorWeb) rutas() http.Handler {
 	mux.HandleFunc("GET /api/vacantes/{slug}/candidatos/{candidato}", c.ManejarVacanteCandidato)
 	mux.HandleFunc("GET /api/vacantes/{slug}/ranking", c.ManejarVacanteRanking)
 
-	// 2. Índice de la API en la raíz; cualquier otra ruta responde 404 en JSON
-	mux.HandleFunc("GET /{$}", c.ManejarIndice)
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+	// 2. Sin frontend: índice de la API en la raíz. Con frontend: la aplicación (rutas del SPA incluidas).
+	// Una ruta desconocida de /api/ siempre responde 404 en JSON.
+	noEncontrada := func(w http.ResponseWriter, r *http.Request) {
 		ResponderJSON(w, http.StatusNotFound, map[string]string{"error": "ruta no encontrada"})
-	})
+	}
+	if s.frontend == "" {
+		mux.HandleFunc("GET /{$}", c.ManejarIndice)
+		mux.HandleFunc("/", noEncontrada)
+	} else {
+		app := servirFrontend(s.frontend)
+		mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+			if strings.HasPrefix(r.URL.Path, "/api/") || (r.Method != http.MethodGet && r.Method != http.MethodHead) {
+				noEncontrada(w, r)
+				return
+			}
+			app.ServeHTTP(w, r)
+		})
+	}
 
 	return cadenaMiddleware(c.conSesion(mux))
+}
+
+// servirFrontend entrega los archivos del frontend compilado; cualquier ruta que no sea un archivo
+// devuelve index.html (el SPA resuelve sus rutas). Los archivos de assets/ llevan hash en el nombre y se
+// guardan en caché para siempre; index.html se revalida siempre para tomar cada versión nueva.
+func servirFrontend(dir string) http.Handler {
+	archivos := http.FileServer(http.Dir(dir))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		limpia := path.Clean("/" + r.URL.Path)
+		if info, err := os.Stat(filepath.Join(dir, filepath.FromSlash(limpia))); err != nil || info.IsDir() {
+			w.Header().Set("Cache-Control", "no-cache")
+			http.ServeFile(w, r, filepath.Join(dir, "index.html"))
+			return
+		}
+		if strings.HasPrefix(limpia, "/assets/") {
+			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		}
+		archivos.ServeHTTP(w, r)
+	})
 }
 
 // Iniciar arranca el servidor HTTP y escucha conexiones entrantes.
@@ -135,7 +188,15 @@ func (s *ServidorWeb) Iniciar(ctx context.Context) error {
 	s.controlador.IniciarAutomatico()
 	fmt.Println("=================================================================")
 	fmt.Printf("[★] SERVIDOR WEB RRHH INICIADO EXITOSAMENTE\n")
-	fmt.Printf("[*] API disponible en: http://localhost:%d (índice de endpoints en /)\n", s.puerto)
+	esquema := "http"
+	if os.Getenv("RRHH_TLS_CERT") != "" && os.Getenv("RRHH_TLS_KEY") != "" {
+		esquema = "https (HTTP/2)"
+	}
+	if s.frontend != "" {
+		fmt.Printf("[*] Aplicación y API en: %s://localhost:%d (frontend: %s)\n", esquema, s.puerto, s.frontend)
+	} else {
+		fmt.Printf("[*] API disponible en: %s://localhost:%d (índice en /; para servir la aplicación: pnpm build en frontend/)\n", esquema, s.puerto)
+	}
 	if s.controlador.sesiones == nil {
 		fmt.Println("[!] SIN base de datos: no hay inicio de sesión y la API queda ABIERTA (configure RRHH_MYSQL_*)")
 	}
@@ -143,7 +204,15 @@ func (s *ServidorWeb) Iniciar(ctx context.Context) error {
 	fmt.Printf("[*] Para detener el servidor presiona Ctrl + C\n")
 	fmt.Println("=================================================================")
 
-	err := s.servidorHTTP.ListenAndServe()
+	// Con certificado se sirve por HTTPS, y entonces el navegador usa HTTP/2: todas las peticiones y
+	// los streams en vivo viajan por una sola conexión, sin el límite de 6 por servidor de HTTP/1.1.
+	cert, clave := os.Getenv("RRHH_TLS_CERT"), os.Getenv("RRHH_TLS_KEY")
+	var err error
+	if cert != "" && clave != "" {
+		err = s.servidorHTTP.ListenAndServeTLS(cert, clave)
+	} else {
+		err = s.servidorHTTP.ListenAndServe()
+	}
 	if err != nil && err != http.ErrServerClosed {
 		return fmt.Errorf("error en servidor HTTP: %w", err)
 	}

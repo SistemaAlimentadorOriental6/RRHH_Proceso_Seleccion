@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"sync"
 	"time"
 
 	"go-rrhh/agentes"
@@ -14,7 +15,12 @@ import (
 	"go-rrhh/orquestador"
 )
 
-const plazoLecturaBase = 30 * time.Second
+const (
+	plazoLecturaBase = 30 * time.Second
+	// vigenciaOfertasBase es cuánto se reutiliza la lista de vacantes leída de la base: cada petición de
+	// candidatos la necesita y es un agregado sobre todas las postulaciones.
+	vigenciaOfertasBase = 3 * time.Second
+)
 
 // LectorBase es lo que la API lee de la base de datos (lo implementa almacen.Almacen).
 type LectorBase interface {
@@ -44,6 +50,15 @@ type RepositorioMySQL struct {
 	*RepositorioDisco
 	base      LectorBase
 	descargas string
+
+	muOfertas sync.Mutex
+	ofertasEn time.Time
+	cacheOf   []ofertaLeida
+}
+
+// lectorSinTexto lo implementa almacen.Almacen: lee a los candidatos sin el texto de cada perfil.
+type lectorSinTexto interface {
+	CandidatosDeOfertaSinTexto(ctx context.Context, idComputrabajo string) ([]modelos.Candidato, error)
 }
 
 // NuevoRepositorioMySQL crea el repositorio; disco aporta lo que aún vive en archivos.
@@ -57,7 +72,21 @@ type ofertaLeida struct {
 	clave string
 }
 
+// ofertas devuelve una copia de la lista de vacantes de la base, reutilizada por unos segundos.
 func (r *RepositorioMySQL) ofertas() ([]ofertaLeida, error) {
+	r.muOfertas.Lock()
+	defer r.muOfertas.Unlock()
+	if r.cacheOf == nil || time.Since(r.ofertasEn) >= vigenciaOfertasBase {
+		lista, err := r.leerOfertas()
+		if err != nil {
+			return nil, err
+		}
+		r.cacheOf, r.ofertasEn = lista, time.Now()
+	}
+	return append([]ofertaLeida(nil), r.cacheOf...), nil
+}
+
+func (r *RepositorioMySQL) leerOfertas() ([]ofertaLeida, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), plazoLecturaBase)
 	defer cancel()
 	lista, err := r.base.OfertasProcesadas(ctx)
@@ -79,6 +108,7 @@ func (r *RepositorioMySQL) ofertas() ([]ofertaLeida, error) {
 				TotalCandidatos: o.Total,
 				TotalAptos:      o.Aptos,
 				TotalNoAptos:    o.Total - o.Aptos,
+				TotalPendientes: o.Pendientes,
 				TieneRankingIA:  errRanking == nil,
 				ActualizadoEn:   o.ActualizadoEn,
 			},
@@ -126,6 +156,15 @@ func (r *RepositorioMySQL) ResolverOferta(slugOID string) (*ResumenOferta, error
 
 // ObtenerCandidatosOferta devuelve los candidatos de una vacante con filtro opcional (todos, aptos, no_aptos).
 func (r *RepositorioMySQL) ObtenerCandidatosOferta(idOferta string, filtro string) ([]modelos.Candidato, error) {
+	return r.candidatosOferta(idOferta, filtro, true)
+}
+
+// ObtenerCandidatosOfertaSinTexto es ObtenerCandidatosOferta sin el texto del perfil (para las pantallas).
+func (r *RepositorioMySQL) ObtenerCandidatosOfertaSinTexto(idOferta string, filtro string) ([]modelos.Candidato, error) {
+	return r.candidatosOferta(idOferta, filtro, false)
+}
+
+func (r *RepositorioMySQL) candidatosOferta(idOferta string, filtro string, conTexto bool) ([]modelos.Candidato, error) {
 	var soloAptos, soloNoAptos bool
 	switch filtro {
 	case "", "todos":
@@ -154,7 +193,11 @@ func (r *RepositorioMySQL) ObtenerCandidatosOferta(idOferta string, filtro strin
 
 	ctx, cancel := context.WithTimeout(context.Background(), plazoLecturaBase)
 	defer cancel()
-	todos, err := r.base.CandidatosDeOferta(ctx, elegida.clave)
+	leer := r.base.CandidatosDeOferta
+	if l, ok := r.base.(lectorSinTexto); ok && !conTexto {
+		leer = l.CandidatosDeOfertaSinTexto
+	}
+	todos, err := leer(ctx, elegida.clave)
 	if err != nil {
 		return nil, fmt.Errorf("error leyendo los candidatos de %q de la base de datos: %w", idOferta, err)
 	}
@@ -176,30 +219,13 @@ func (r *RepositorioMySQL) ObtenerCandidatosOferta(idOferta string, filtro strin
 // ObtenerRankingOferta devuelve el ranking restringido a las personas aptas de la vacante,
 // reordenado por puntaje con puestos 1..n dentro de ella.
 func (r *RepositorioMySQL) ObtenerRankingOferta(idOferta string) ([]modelos.CandidatoCalificadoIA, error) {
-	candidatos, err := r.ObtenerCandidatosOferta(idOferta, "aptos")
+	candidatos, err := r.candidatosOferta(idOferta, "aptos", false)
 	if err != nil {
 		return nil, err
 	}
-	enOferta := make(map[string]struct{}, len(candidatos))
-	for _, c := range candidatos {
-		enOferta[soloDigitos(c.Cedula)] = struct{}{}
-	}
-
 	global, err := r.RepositorioDisco.ObtenerRankingIA()
 	if err != nil {
 		return nil, err
 	}
-	filtrado := make([]modelos.CandidatoCalificadoIA, 0, len(global))
-	for _, item := range global {
-		if _, ok := enOferta[soloDigitos(item.Candidato.Cedula)]; ok {
-			filtrado = append(filtrado, item)
-		}
-	}
-	sort.SliceStable(filtrado, func(i, j int) bool {
-		return filtrado[i].EvaluacionIA.ScoreTotal > filtrado[j].EvaluacionIA.ScoreTotal
-	})
-	for i := range filtrado {
-		filtrado[i].Puesto = i + 1
-	}
-	return filtrado, nil
+	return rankingDeAptos(candidatos, global), nil
 }

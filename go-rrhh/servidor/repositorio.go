@@ -34,13 +34,15 @@ var (
 
 // ResumenOferta contiene información consolidada de una convocatoria laboral.
 type ResumenOferta struct {
-	ID              string    `json:"id"`
-	Slug            string    `json:"slug"`
-	Titulo          string    `json:"titulo"`
-	Carpeta         string    `json:"carpeta"`
-	TotalCandidatos int       `json:"total_candidatos"`
-	TotalAptos      int       `json:"total_aptos"`
-	TotalNoAptos    int       `json:"total_no_aptos"`
+	ID              string `json:"id"`
+	Slug            string `json:"slug"`
+	Titulo          string `json:"titulo"`
+	Carpeta         string `json:"carpeta"`
+	TotalCandidatos int    `json:"total_candidatos"`
+	TotalAptos      int    `json:"total_aptos"`
+	TotalNoAptos    int    `json:"total_no_aptos"`
+	// TotalPendientes son los no aptos con verificación pendiente (una fuente no respondió, falta un dato).
+	TotalPendientes int       `json:"total_pendientes"`
 	TieneRankingIA  bool      `json:"tiene_ranking_ia"`
 	ActualizadoEn   time.Time `json:"actualizado_en"`
 	// Error se informa cuando el candidatos.json de la oferta existe pero está dañado, en lugar
@@ -121,7 +123,10 @@ func (r *RepositorioDisco) carpetaOferta(id string) (string, error) {
 // registroLigero deserializa solo lo necesario para contar: evita materializar el objeto completo
 // de cada candidato (RUNT, SIMIT, texto del perfil, etc.) al listar ofertas.
 type registroLigero struct {
-	EsApto bool `json:"es_apto"`
+	EsApto     bool `json:"es_apto"`
+	Evaluacion *struct {
+		VerificacionPendiente bool `json:"verificacion_pendiente"`
+	} `json:"evaluacion_idoneidad"`
 }
 
 // ListarOfertas busca todas las carpetas de ofertas laborales en el directorio de descargas.
@@ -163,6 +168,8 @@ func (r *RepositorioDisco) ListarOfertas() ([]ResumenOferta, error) {
 			for _, c := range lista {
 				if c.EsApto {
 					oferta.TotalAptos++
+				} else if c.Evaluacion != nil && c.Evaluacion.VerificacionPendiente {
+					oferta.TotalPendientes++
 				}
 			}
 			oferta.TotalCandidatos = len(lista)
@@ -258,17 +265,23 @@ func (r *RepositorioDisco) ObtenerRankingOferta(idOferta string) ([]modelos.Cand
 	if err != nil {
 		return nil, err
 	}
-	enOferta := make(map[string]struct{}, len(candidatos))
-	for _, c := range candidatos {
-		enOferta[soloDigitos(c.Cedula)] = struct{}{}
-	}
-
 	global, err := r.ObtenerRankingIA()
 	if err != nil {
 		return nil, err
 	}
+	return rankingDeAptos(candidatos, global), nil
+}
 
-	filtrado := make([]modelos.CandidatoCalificadoIA, 0, len(global))
+// rankingDeAptos deja del ranking global solo a los aptos de la vacante (los que lleguen en candidatos
+// con EsApto), ordenados por puntaje con puestos 1..n dentro de ella.
+func rankingDeAptos(candidatos []modelos.Candidato, global []modelos.CandidatoCalificadoIA) []modelos.CandidatoCalificadoIA {
+	enOferta := make(map[string]struct{}, len(candidatos))
+	for _, c := range candidatos {
+		if c.EsApto {
+			enOferta[soloDigitos(c.Cedula)] = struct{}{}
+		}
+	}
+	filtrado := make([]modelos.CandidatoCalificadoIA, 0, len(enOferta))
 	for _, item := range global {
 		if _, ok := enOferta[soloDigitos(item.Candidato.Cedula)]; ok {
 			filtrado = append(filtrado, item)
@@ -280,7 +293,7 @@ func (r *RepositorioDisco) ObtenerRankingOferta(idOferta string) ([]modelos.Cand
 	for i := range filtrado {
 		filtrado[i].Puesto = i + 1
 	}
-	return filtrado, nil
+	return filtrado
 }
 
 // GuardarRankingIA almacena el ranking evaluado en disco de forma atómica.

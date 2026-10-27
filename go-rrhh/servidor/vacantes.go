@@ -72,13 +72,10 @@ func (c *ControladorRRHH) ManejarVacanteCandidatos(w http.ResponseWriter, r *htt
 	}
 
 	q := r.URL.Query()
-	candidatos, err := c.repositorio.ObtenerCandidatosOferta(oferta.ID, q.Get("filtro"))
+	candidatos, err := c.candidatosOferta(oferta.ID, q.Get("filtro"), quiereCV(q))
 	if err != nil {
 		responderError(w, err)
 		return
-	}
-	if !quiereCV(q) {
-		candidatos = sinTextoPerfil(candidatos)
 	}
 	pagina, total, err := paginar(conSlug(candidatos), q)
 	if err != nil {
@@ -86,7 +83,7 @@ func (c *ControladorRRHH) ManejarVacanteCandidatos(w http.ResponseWriter, r *htt
 		return
 	}
 	w.Header().Set("X-Total-Count", strconv.Itoa(total))
-	ResponderJSON(w, http.StatusOK, pagina)
+	ResponderJSONConETag(w, r, pagina)
 }
 
 // buscarCandidato localiza a una persona de la vacante por cédula o por el slug de su nombre.
@@ -95,6 +92,11 @@ func (c *ControladorRRHH) buscarCandidato(idOferta, id string) (*CandidatoVacant
 	if err != nil {
 		return nil, err
 	}
+	return buscarEn(candidatos, id)
+}
+
+// buscarEn localiza a una persona, por cédula o por el slug de su nombre, en candidatos ya leídos.
+func buscarEn(candidatos []modelos.Candidato, id string) (*CandidatoVacante, error) {
 	idDigitos := soloDigitos(id)
 	esCedula := idDigitos != "" && idDigitos == id
 	for _, cv := range conSlug(candidatos) {
@@ -112,14 +114,22 @@ func (c *ControladorRRHH) ManejarVacanteCandidato(w http.ResponseWriter, r *http
 		responderError(w, err)
 		return
 	}
-	encontrado, err := c.buscarCandidato(oferta.ID, r.PathValue("candidato"))
+	// Una sola lectura de la vacante: de ella salen la persona y los aptos para su puesto en el ranking
+	// (antes se leía completa dos veces).
+	candidatos, err := c.repositorio.ObtenerCandidatosOferta(oferta.ID, "")
+	if err != nil {
+		responderError(w, err)
+		return
+	}
+	encontrado, err := buscarEn(candidatos, r.PathValue("candidato"))
 	if err != nil {
 		responderError(w, err)
 		return
 	}
 
 	detalle := DetalleCandidatoVacante{CandidatoVacante: *encontrado}
-	if ranking, err := c.repositorio.ObtenerRankingOferta(oferta.ID); err == nil {
+	if global, err := c.repositorio.ObtenerRankingIA(); err == nil {
+		ranking := rankingDeAptos(candidatos, global)
 		for i := range ranking {
 			if soloDigitos(ranking[i].Candidato.Cedula) == soloDigitos(encontrado.Cedula) {
 				item := sinTextoCV(ranking[i : i+1])[0]

@@ -31,6 +31,14 @@ type DatosValidados struct {
 	Edad            int       // años cumplidos al momento de validar
 }
 
+// edadParaGuardar es la edad como valor de la columna perfiles.edad: NULL si no se conoce.
+func edadParaGuardar(edad int) any {
+	if edad <= 0 || edad > 120 {
+		return nil
+	}
+	return edad
+}
+
 // edadEn calcula los años cumplidos de quien nació en nacimiento, a la fecha ahora.
 func edadEn(nacimiento, ahora time.Time) int {
 	anios := ahora.Year() - nacimiento.Year()

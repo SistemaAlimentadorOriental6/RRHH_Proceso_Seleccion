@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"go-rrhh/almacen"
@@ -49,12 +50,67 @@ func (c *ControladorRRHH) usuarioDe(r *http.Request) (almacen.Usuario, bool) {
 	if err != nil {
 		return almacen.Usuario{}, false
 	}
+	if u, ok := c.sesionesVistas.buscar(ck.Value); ok {
+		return u, true
+	}
 	u, ok, err := c.sesiones.UsuarioDeSesion(r.Context(), ck.Value)
 	if err != nil {
 		log.Printf("[!] Error validando la sesión: %v", err)
 		return almacen.Usuario{}, false
 	}
+	if ok {
+		c.sesionesVistas.guardar(ck.Value, u)
+	}
 	return u, ok
+}
+
+// vigenciaSesionVista es cuánto se confía en una sesión ya validada sin volver a la base. Cerrar sesión
+// la borra al instante; vencida o desactivada en otra parte deja de valer como mucho en este tiempo.
+const vigenciaSesionVista = 30 * time.Second
+
+// sesionesVistas recuerda por unos segundos las sesiones válidas: cada petición de la API (y las
+// pantallas hacen muchas) consultaba la base solo para esto.
+type sesionesVistas struct {
+	mu     sync.Mutex
+	vistas map[string]sesionVista
+}
+
+type sesionVista struct {
+	u     almacen.Usuario
+	hasta time.Time
+}
+
+func (s *sesionesVistas) buscar(token string) (almacen.Usuario, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	v, ok := s.vistas[token]
+	if !ok || time.Now().After(v.hasta) {
+		return almacen.Usuario{}, false
+	}
+	return v.u, true
+}
+
+func (s *sesionesVistas) guardar(token string, u almacen.Usuario) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ahora := time.Now()
+	if s.vistas == nil || len(s.vistas) > 1000 {
+		for k, v := range s.vistas { // no crece sin límite: se barren las vencidas
+			if ahora.After(v.hasta) {
+				delete(s.vistas, k)
+			}
+		}
+		if s.vistas == nil {
+			s.vistas = map[string]sesionVista{}
+		}
+	}
+	s.vistas[token] = sesionVista{u: u, hasta: ahora.Add(vigenciaSesionVista)}
+}
+
+func (s *sesionesVistas) olvidar(token string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.vistas, token)
 }
 
 func ponerCookieSesion(w http.ResponseWriter, r *http.Request, token string, duracion time.Duration) {
@@ -131,6 +187,7 @@ func (c *ControladorRRHH) ManejarLogout(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if ck, err := r.Cookie(cookieSesion); err == nil {
+		c.sesionesVistas.olvidar(ck.Value)
 		if err := c.sesiones.CerrarSesion(r.Context(), ck.Value); err != nil {
 			log.Printf("[!] Error cerrando la sesión: %v", err)
 		}

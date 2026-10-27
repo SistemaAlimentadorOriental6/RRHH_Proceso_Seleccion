@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -17,6 +18,7 @@ import (
 	"go-rrhh/agentes"
 	"go-rrhh/modelos"
 	"go-rrhh/orquestador"
+	"go-rrhh/utilidades"
 )
 
 const (
@@ -50,6 +52,51 @@ type eventoSSE struct {
 	id    int
 	tipo  string
 	datos []byte
+	// indice y etapa (de los eventos de candidato) permiten compactar la repetición; indice -1 si no aplica.
+	indice int
+	etapa  string
+}
+
+// minimoParaCompactar es desde cuántos eventos pendientes se compacta lo que se envía: al unirse a un
+// análisis en marcha (o volver de una pestaña oculta) llegaban miles de eventos, casi todos etapas
+// intermedias de personas que ya terminaron. En vivo llegan de a pocos y se envían tal cual.
+const minimoParaCompactar = 50
+
+// compactar deja, de una tanda de eventos pendientes, lo necesario para reconstruir el estado: de cada
+// persona su descubrimiento, su resultado y, si aún no terminó, la última noticia de cada etapa; del
+// resumen, el último. El último evento se conserva siempre (su id es desde donde se reconecta).
+func compactar(eventos []eventoSSE) []eventoSSE {
+	if len(eventos) < minimoParaCompactar {
+		return eventos
+	}
+	ultimoCompleto := map[int]int{}
+	ultimaEtapa := map[string]int{}
+	ultimoResumen := -1
+	for i, ev := range eventos {
+		switch ev.tipo {
+		case "candidato.completo":
+			ultimoCompleto[ev.indice] = i
+		case "candidato.etapa":
+			ultimaEtapa[strconv.Itoa(ev.indice)+"|"+ev.etapa] = i
+		case "resumen":
+			ultimoResumen = i
+		}
+	}
+	salida := make([]eventoSSE, 0, len(eventos)/4)
+	for i, ev := range eventos {
+		conservar := true
+		switch ev.tipo {
+		case "resumen":
+			conservar = i == ultimoResumen
+		case "candidato.etapa":
+			fin, termino := ultimoCompleto[ev.indice]
+			conservar = (!termino || fin < i) && ultimaEtapa[strconv.Itoa(ev.indice)+"|"+ev.etapa] == i
+		}
+		if conservar || i == len(eventos)-1 {
+			salida = append(salida, ev)
+		}
+	}
+	return salida
 }
 
 // JobAnalisis es el análisis de una vacante. Vive aparte de la conexión HTTP: si el cliente se cae
@@ -88,13 +135,24 @@ func (j *JobAnalisis) Emitir(tipo string, datos any) {
 		log.Printf("[!] No se pudo serializar el evento %s: %v", tipo, err)
 		return
 	}
+	ev := eventoSSE{tipo: tipo, datos: cuerpo, indice: -1}
+	if strings.HasPrefix(tipo, "candidato.") {
+		var clave struct {
+			Indice *int   `json:"indice"`
+			Etapa  string `json:"etapa"`
+		}
+		if json.Unmarshal(cuerpo, &clave) == nil && clave.Indice != nil {
+			ev.indice, ev.etapa = *clave.Indice, clave.Etapa
+		}
+	}
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	if len(j.eventos) >= maxEventosJob {
 		j.truncado = true
 		return
 	}
-	j.eventos = append(j.eventos, eventoSSE{id: len(j.eventos) + 1, tipo: tipo, datos: cuerpo})
+	ev.id = len(j.eventos) + 1
+	j.eventos = append(j.eventos, ev)
 	j.avisarLocked()
 }
 
@@ -132,7 +190,10 @@ func (j *JobAnalisis) desde(ultimo int) ([]eventoSSE, bool) {
 	}
 	var pendientes []eventoSSE
 	if ultimo < len(j.eventos) {
-		pendientes = append(pendientes, j.eventos[ultimo:]...)
+		pendientes = compactar(j.eventos[ultimo:])
+		if len(pendientes) == len(j.eventos)-ultimo {
+			pendientes = append([]eventoSSE(nil), pendientes...) // copia: el job sigue agregando
+		}
 	}
 	return pendientes, j.estado != jobEnCurso
 }
@@ -206,11 +267,60 @@ func (c *ControladorRRHH) buscarJob(id string) *JobAnalisis {
 }
 
 // guardarOfertasEnCache recuerda la última lista de vacantes leída con su conteo de inscritos.
+// También la deja en disco (sobrevive a un reinicio) y avisa a las pantallas para que la vuelvan a pedir.
 func (c *ControladorRRHH) guardarOfertasEnCache(ofertas []ofertaConConteo) {
 	c.muCache.Lock()
-	defer c.muCache.Unlock()
 	c.cacheOfertas = ofertas
 	c.cacheOfertasEn = time.Now()
+	guardada := listaGuardada{En: c.cacheOfertasEn}
+	c.muCache.Unlock()
+	for _, o := range ofertas {
+		guardada.Ofertas = append(guardada.Ofertas, ofertaGuardada{Oferta: o.OfertaLaboral, Cuenta: o.Cuenta, Total: o.Total, Error: o.ErrorMsg})
+	}
+
+	if c.cfg.DirectorioDescargas != "" {
+		if err := utilidades.EscribirJSONAtomico(filepath.Join(c.cfg.DirectorioDescargas, archivoListaVacantes), guardada, false); err != nil {
+			log.Printf("[!] No se pudo guardar la lista de vacantes en disco: %v", err)
+		}
+	}
+	c.cambios.emitir("vacantes", map[string]any{})
+}
+
+// archivoListaVacantes guarda la última lista de vacantes para servirla al instante tras un reinicio.
+const archivoListaVacantes = "vacantes_computrabajo.json"
+
+type listaGuardada struct {
+	En      time.Time        `json:"en"`
+	Ofertas []ofertaGuardada `json:"ofertas"`
+}
+
+// ofertaGuardada lleva la cuenta aparte: OfertaLaboral no la serializa y sin ella el análisis abriría
+// la sesión de otra cuenta.
+type ofertaGuardada struct {
+	Oferta modelos.OfertaLaboral `json:"oferta"`
+	Cuenta int                   `json:"cuenta"`
+	Total  *int                  `json:"total"`
+	Error  string                `json:"error,omitempty"`
+}
+
+// cargarOfertasGuardadas recupera la lista que quedó en disco. Queda con su fecha real: es vieja, así
+// que la primera petición la sirve y pide una nueva en segundo plano.
+func (c *ControladorRRHH) cargarOfertasGuardadas() {
+	if c.cfg.DirectorioDescargas == "" {
+		return
+	}
+	var guardada listaGuardada
+	if err := utilidades.LeerJSON(filepath.Join(c.cfg.DirectorioDescargas, archivoListaVacantes), &guardada); err != nil || len(guardada.Ofertas) == 0 {
+		return
+	}
+	lista := make([]ofertaConConteo, 0, len(guardada.Ofertas))
+	for _, g := range guardada.Ofertas {
+		g.Oferta.Cuenta = g.Cuenta
+		lista = append(lista, ofertaConConteo{OfertaLaboral: g.Oferta, Total: g.Total, ErrorMsg: g.Error})
+	}
+	c.muCache.Lock()
+	c.cacheOfertas, c.cacheOfertasEn = lista, guardada.En
+	c.muCache.Unlock()
 }
 
 func (c *ControladorRRHH) ofertasEnCache() ([]ofertaConConteo, time.Time) {
@@ -325,6 +435,10 @@ func (c *ControladorRRHH) iniciarJobAnalisis(oferta modelos.OfertaLaboral, opts 
 }
 
 func (c *ControladorRRHH) ejecutarJobAnalisis(ctx context.Context, job *JobAnalisis, oferta modelos.OfertaLaboral, opts orquestador.OpcionesAnalisis) {
+	// Las pantallas se enteran del inicio y del final por /api/cambios, sin sondear /api/jobs. Este
+	// defer corre el último, con el estado final ya puesto.
+	c.avisarJob(job)
+	defer c.avisarJob(job)
 	defer job.cancel()
 	t0 := time.Now()
 
@@ -422,6 +536,12 @@ func (c *ControladorRRHH) ejecutarJobAnalisis(ctx context.Context, job *JobAnali
 		job.Emitir("job.completado", map[string]any{"resumen": resumen, "duracion_ms": duracion})
 		job.terminar(jobCompletado, &resumen)
 	}
+}
+
+// avisarJob publica el estado de un análisis (en_curso, completado, error, cancelado).
+func (c *ControladorRRHH) avisarJob(job *JobAnalisis) {
+	e := job.estadoJob()
+	c.cambios.emitir("job", map[string]string{"id": e.ID, "oferta_id": e.OfertaID, "titulo": e.Titulo, "estado": e.Estado})
 }
 
 // ManejarAnalizarVacante analiza los postulados de una vacante y transmite el avance por SSE.
@@ -532,6 +652,7 @@ func (c *ControladorRRHH) transmitirJob(w http.ResponseWriter, r *http.Request, 
 	ping := time.NewTicker(intervaloPing)
 	defer ping.Stop()
 
+	marcado := false
 	for {
 		pendientes, terminado := job.desde(ultimo)
 		for _, ev := range pendientes {
@@ -540,7 +661,19 @@ func (c *ControladorRRHH) transmitirJob(w http.ResponseWriter, r *http.Request, 
 			}
 			ultimo = ev.id
 		}
-		if len(pendientes) > 0 && rc.Flush() != nil {
+		// Si el job ya terminó todo es repetición y el evento final cierra el stream: el marcador iría
+		// después de él (y el cliente ya no lo necesita).
+		if !marcado && len(pendientes) > 0 && !terminado {
+			// Lo anterior es la repetición de lo ya ocurrido (al recargar o unirse a un análisis en curso);
+			// a partir de aquí los eventos son en vivo. La pantalla no anima como "nuevo" lo repetido.
+			marcado = true
+			if _, err := fmt.Fprint(w, "event: repeticion.fin\ndata: {}\n\n"); err != nil {
+				return
+			}
+			if rc.Flush() != nil {
+				return
+			}
+		} else if len(pendientes) > 0 && rc.Flush() != nil {
 			return
 		}
 		if terminado && len(pendientes) == 0 {
@@ -659,14 +792,15 @@ func (c *ControladorRRHH) ManejarCandidatosGuardadosVacante(w http.ResponseWrite
 		return
 	}
 
-	candidatos, err := c.repositorio.ObtenerCandidatosOferta(agentes.LimpiarNombre(titulo), "")
+	candidatos, err := c.candidatosOferta(agentes.LimpiarNombre(titulo), "", false)
 	if err != nil {
 		if errors.Is(err, ErrNoEncontrado) {
+			log.Printf("[!] Sin candidatos guardados para la vacante %s (%q): %v", id, titulo, err)
 			ResponderJSON(w, http.StatusOK, []CandidatoVacante{}) // vacante sin análisis previo
 			return
 		}
 		responderError(w, err)
 		return
 	}
-	ResponderJSON(w, http.StatusOK, conSlug(sinTextoPerfil(candidatos)))
+	ResponderJSONConETag(w, r, conSlug(candidatos))
 }

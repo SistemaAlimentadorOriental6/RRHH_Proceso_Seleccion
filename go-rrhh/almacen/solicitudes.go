@@ -824,7 +824,7 @@ func (a *Almacen) CandidatoPorPostulacion(ctx context.Context, postulacionID str
 		`SELECT o.id_computrabajo, o.titulo FROM postulaciones po JOIN ofertas o ON o.id = po.oferta_id WHERE po.id = ?`, id).Scan(&oferta.ID, &oferta.Titulo); err != nil {
 		return modelos.OfertaLaboral{}, nil, err
 	}
-	lista, err := a.candidatosDonde(ctx, "po.id = ?", id)
+	lista, err := a.candidatosDonde(ctx, true, "po.id = ?", id)
 	if err != nil {
 		return modelos.OfertaLaboral{}, nil, err
 	}

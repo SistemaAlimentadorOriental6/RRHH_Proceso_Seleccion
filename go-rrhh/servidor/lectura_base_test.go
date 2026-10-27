@@ -218,3 +218,59 @@ func TestAPILeeLosCandidatosDeLaBase(t *testing.T) {
 		t.Errorf("vacante inexistente: código %d", rr.Code)
 	}
 }
+
+// lectorConSinTexto cuenta qué lectura usa la API: las pantallas no deben leer el texto de los perfiles.
+type lectorConSinTexto struct {
+	*lectorFalso
+	conTexto, sinTexto int
+}
+
+func (l *lectorConSinTexto) CandidatosDeOferta(ctx context.Context, id string) ([]modelos.Candidato, error) {
+	l.conTexto++
+	return l.lectorFalso.CandidatosDeOferta(ctx, id)
+}
+
+func (l *lectorConSinTexto) CandidatosDeOfertaSinTexto(ctx context.Context, id string) ([]modelos.Candidato, error) {
+	l.sinTexto++
+	return l.lectorFalso.CandidatosDeOferta(ctx, id)
+}
+
+func TestPantallasLeenCandidatosSinTextoDelPerfil(t *testing.T) {
+	cfg, _ := montarDescargas(t)
+	ctrl := NuevoControladorRRHH(cfg, NuevoRepositorioDisco(cfg.DirectorioDescargas), "")
+	lector := &lectorConSinTexto{lectorFalso: lectorConDosVacantes()}
+	ctrl.repositorio = NuevoRepositorioMySQL(NuevoRepositorioDisco(cfg.DirectorioDescargas), lector, cfg.DirectorioDescargas)
+	t.Cleanup(ctrl.Detener)
+	h := (&ServidorWeb{controlador: ctrl}).rutas()
+
+	if rr := pedir(h, "GET", "/api/vacantes/operador-buses-metro/candidatos", nil); rr.Code != http.StatusOK {
+		t.Fatalf("código %d", rr.Code)
+	}
+	if lector.sinTexto != 1 || lector.conTexto != 0 {
+		t.Errorf("la lista debe leerse sin texto: sin=%d con=%d", lector.sinTexto, lector.conTexto)
+	}
+	pedir(h, "GET", "/api/vacantes/operador-buses-metro/candidatos?incluir_cv=1", nil)
+	if lector.conTexto != 1 {
+		t.Errorf("con incluir_cv=1 sí se lee el texto: con=%d", lector.conTexto)
+	}
+}
+
+// Una sesión validada no vuelve a la base hasta vencer, y cerrar sesión la olvida al instante.
+func TestSesionesVistas(t *testing.T) {
+	var s sesionesVistas
+	if _, ok := s.buscar("t"); ok {
+		t.Fatal("vacía no debe encontrar nada")
+	}
+	s.guardar("t", almacen.Usuario{Correo: "a@b.co"})
+	if u, ok := s.buscar("t"); !ok || u.Correo != "a@b.co" {
+		t.Errorf("recién guardada: %+v %v", u, ok)
+	}
+	s.olvidar("t")
+	if _, ok := s.buscar("t"); ok {
+		t.Error("tras olvidarla no debe encontrarse")
+	}
+	s.vistas["v"] = sesionVista{hasta: time.Now().Add(-time.Second)}
+	if _, ok := s.buscar("v"); ok {
+		t.Error("una vencida no vale")
+	}
+}

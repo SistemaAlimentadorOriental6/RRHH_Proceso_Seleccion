@@ -3,6 +3,8 @@ package servidor
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go-rrhh/agentes"
@@ -67,6 +70,8 @@ type ControladorRRHH struct {
 	ofertasCT      FuenteOfertas
 	cuentaCT       int
 	semCT          chan struct{}
+	refrescandoCT  atomic.Bool    // hay un refresco de la lista de vacantes en segundo plano
+	refrescos      sync.WaitGroup // refrescos en curso (Detener los espera)
 
 	// Buzón de hojas de vida (se crea al primer uso). Ver correo.go.
 	muCorreo sync.Mutex
@@ -79,9 +84,10 @@ type ControladorRRHH struct {
 	fabricaAnalizador FabricaAnalizador
 
 	// Última lista de vacantes con su conteo: se sirve mientras un análisis ocupa el navegador.
-	muCache        sync.Mutex
-	cacheOfertas   []ofertaConConteo
-	cacheOfertasEn time.Time
+	muCache           sync.Mutex
+	cacheOfertas      []ofertaConConteo
+	cacheOfertasEn    time.Time
+	ultimoAvisoConteo time.Time // último aviso de conteo parcial (computrabajo.go)
 
 	// Datos faltantes (requieren base de datos; son nil sin ella). Ver datos_faltantes.go y
 	// reanudacion.go.
@@ -94,15 +100,16 @@ type ControladorRRHH struct {
 	cambios     *difusor      // avisa a las pantallas abiertas cuando el flujo avanza (cambios.go)
 
 	// Inicio de sesión (nil sin base de datos: la API queda abierta). Ver autenticacion.go.
-	sesiones    sesionesBase
-	limiteLogin *limitadorIP
+	sesiones       sesionesBase
+	sesionesVistas sesionesVistas // sesiones ya validadas, por unos segundos (autenticacion.go)
+	limiteLogin    *limitadorIP
 }
 
 // NuevoControladorRRHH instancia el controlador HTTP con sus dependencias inyectadas.
 func NuevoControladorRRHH(cfg *configuracion.Configuracion, repo RepositorioCandidatos, modeloIA string) *ControladorRRHH {
 	base, cancel := context.WithCancel(context.Background())
 	cuentas := cfg.CuentasComputrabajo()
-	return &ControladorRRHH{
+	c := &ControladorRRHH{
 		cfg:         cfg,
 		repositorio: repo,
 		agenteIA:    agentes.NuevoAgenteIA(cfg, modeloIA), // un solo cliente HTTP reutilizado
@@ -129,6 +136,8 @@ func NuevoControladorRRHH(cfg *configuracion.Configuracion, repo RepositorioCand
 			return orquestador.NuevoAnalizador(cfg, fuente, opts, rep)
 		},
 	}
+	c.cargarOfertasGuardadas()
+	return c
 }
 
 // ConPersistencia hace que los análisis en vivo también guarden a cada candidato en la base de
@@ -155,6 +164,7 @@ func (c *ControladorRRHH) ConBase(b Base) {
 // Detener cancela las tareas en segundo plano (llamar al apagar el servidor).
 func (c *ControladorRRHH) Detener() {
 	c.cancelBase()
+	c.refrescos.Wait()
 	// Cerrar el Chrome de Computrabajo si se llegó a abrir.
 	c.semCT <- struct{}{}
 	c.descartarFuenteComputrabajo()
@@ -173,6 +183,30 @@ func ResponderJSON(w http.ResponseWriter, codigo int, datos interface{}) {
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(codigo)
+	_, _ = w.Write(buf.Bytes())
+}
+
+// ResponderJSONConETag responde como ResponderJSON pero con un ETag del contenido: si el cliente
+// manda If-None-Match con esa misma versión se responde 304 sin cuerpo (no hay nada que transferir,
+// parsear ni comparar en la pantalla).
+func ResponderJSONConETag(w http.ResponseWriter, r *http.Request, datos any) {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(datos); err != nil {
+		ResponderJSON(w, http.StatusOK, datos) // misma ruta de error que siempre
+		return
+	}
+	suma := sha256.Sum256(buf.Bytes())
+	etag := `"` + hex.EncodeToString(suma[:12]) + `"`
+	w.Header().Set("ETag", etag)
+	w.Header().Set("Cache-Control", "no-cache")
+	for _, v := range strings.Split(r.Header.Get("If-None-Match"), ",") {
+		if strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(v), "W/")) == etag {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(buf.Bytes())
 }
 
@@ -302,13 +336,10 @@ func (c *ControladorRRHH) ManejarCandidatos(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	candidatos, err := c.repositorio.ObtenerCandidatosOferta(idOferta, q.Get("filtro"))
+	candidatos, err := c.candidatosOferta(idOferta, q.Get("filtro"), quiereCV(q))
 	if err != nil {
 		responderError(w, err)
 		return
-	}
-	if !quiereCV(q) {
-		candidatos = sinTextoPerfil(candidatos)
 	}
 	pagina, total, err := paginar(candidatos, q)
 	if err != nil {
@@ -329,6 +360,21 @@ func sinTextoCV(ranking []modelos.CandidatoCalificadoIA) []modelos.CandidatoCali
 		copia[i].Candidato.TextoPerfil = ""
 	}
 	return copia
+}
+
+// candidatosOferta lee los candidatos de una vacante; sin conTexto no trae el texto del perfil, y la
+// base ni siquiera lo lee del disco (lo que piden las pantallas en cada carga).
+func (c *ControladorRRHH) candidatosOferta(idOferta, filtro string, conTexto bool) ([]modelos.Candidato, error) {
+	if conTexto {
+		return c.repositorio.ObtenerCandidatosOferta(idOferta, filtro)
+	}
+	if r, ok := c.repositorio.(interface {
+		ObtenerCandidatosOfertaSinTexto(idOferta, filtro string) ([]modelos.Candidato, error)
+	}); ok {
+		return r.ObtenerCandidatosOfertaSinTexto(idOferta, filtro)
+	}
+	lista, err := c.repositorio.ObtenerCandidatosOferta(idOferta, filtro)
+	return sinTextoPerfil(lista), err
 }
 
 // sinTextoPerfil devuelve una copia de los candidatos sin el texto del perfil (hasta 5 KB c/u).

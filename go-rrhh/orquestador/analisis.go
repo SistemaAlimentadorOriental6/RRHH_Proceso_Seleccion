@@ -376,6 +376,9 @@ func (a *Analizador) Analizar(ctx context.Context, oferta modelos.OfertaLaboral)
 
 	vistos := make(map[string]bool)
 	cola := make(chan turno, 4096)
+	// Los ya analizados van por su propia fila: confirmarlos es inmediato y antes esperaban detrás del
+	// análisis lento (captchas, portales) de quien iba delante, y la pantalla los mostraba "en cola".
+	colaPrevios := make(chan turno, 4096)
 	var wg sync.WaitGroup
 	for i := 0; i < a.opts.Concurrencia; i++ {
 		wg.Add(1)
@@ -385,32 +388,42 @@ func (a *Analizador) Analizar(ctx context.Context, oferta modelos.OfertaLaboral)
 				if ctx.Err() != nil {
 					continue // vaciar la cola sin procesar
 				}
-				if t.previo != nil {
-					a.reutilizar(ctx, t.previo, t.c.Indice, acum)
-					continue
-				}
 				a.procesarSeguro(ctx, t.c, carpetaOferta, acum)
 			}
 		}()
 	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for t := range colaPrevios {
+			if ctx.Err() == nil {
+				a.reutilizar(ctx, t.previo, t.c.Indice, acum)
+			}
+		}
+	}()
 
 	errListado := a.fuente.ObtenerCandidatosStream(ctx, oferta.URLCandidatos, a.opts.Limite, func(c *modelos.Candidato) {
 		vistos[c.URLDetalle] = true
 		total := a.contar(func(r *ResumenAnalisis) { r.Descubiertos++ }).Descubiertos
-		// Todos pasan por la misma fila, en orden de aparición: con concurrencia 1 se termina a una
-		// persona antes de empezar con la siguiente, también cuando su análisis viene de la caché.
+		// Los nuevos pasan por la misma fila, en orden de aparición: con concurrencia 1 se termina a una
+		// persona antes de empezar con la siguiente.
 		t := turno{c: c}
 		if previo, ok := previos[c.URLDetalle]; ok && a.cacheValido(previo) {
 			t.previo = previo
 		}
 		// "cache" avisa a la pantalla que no es una persona nueva: ya tiene resultado y solo se confirma.
 		a.rep.Emitir("candidato.descubierto", map[string]any{"indice": c.Indice, "nombre": c.Nombre, "descubiertos": total, "cache": t.previo != nil})
+		destino := cola
+		if t.previo != nil {
+			destino = colaPrevios
+		}
 		select {
-		case cola <- t:
+		case destino <- t:
 		case <-ctx.Done():
 		}
 	})
 	close(cola)
+	close(colaPrevios)
 	wg.Wait()
 
 	listadoCompleto := errListado == nil && ctx.Err() == nil
@@ -801,24 +814,15 @@ func (a *Analizador) cerrarSinAptitud(c *modelos.Candidato, carpetaOferta string
 	a.cerrarCandidato(c, carpetaOferta, acum)
 }
 
-// cerrarCandidato persiste al candidato, actualiza los totales y lo informa.
+// cerrarCandidato actualiza los totales, informa el resultado y luego lo persiste. El resultado sale
+// antes de guardar: con la base lenta o ocupada la pantalla lo mostraba segundos después de tenerlo. Si
+// el guardado falla llega como etapa "guardado" en error; si funciona, "candidato.guardado" trae el id
+// de la postulación (la pantalla lo necesita para la rama de contacto).
 func (a *Analizador) cerrarCandidato(c *modelos.Candidato, carpetaOferta string, acum *acumuladorResultados) {
 	if c.EvaluacionIdoneidad != nil {
 		c.EsApto = c.EvaluacionIdoneidad.EsApto
 	}
-	if c.EsApto && a.cfg != nil {
-		if err := a.clasif.GuardarCandidatoApto(c, carpetaOferta); err != nil {
-			a.etapa(c, "guardado", estadoError, "no se pudo guardar en candidatos_aptos: "+err.Error(), 0)
-		}
-		if err := a.clasif.GuardarCandidatoApto(c, a.cfg.DirectorioDescargas); err != nil {
-			a.etapa(c, "guardado", estadoError, "no se pudo guardar en el consolidado: "+err.Error(), 0)
-		}
-	}
 	acum.agregar(c)
-	if err := guardarEnBase(a.persistencia, a.oferta, c); err != nil {
-		a.etapa(c, "guardado", estadoError, "no se pudo guardar en la base de datos: "+err.Error(), 0)
-	}
-	a.guardarIA(c)
 	a.contar(func(r *ResumenAnalisis) {
 		r.Procesados++
 		if c.EsApto {
@@ -834,6 +838,21 @@ func (a *Analizador) cerrarCandidato(c *modelos.Candidato, carpetaOferta string,
 		}
 	})
 	a.informarCompleto(c, false)
+
+	if c.EsApto && a.cfg != nil {
+		if err := a.clasif.GuardarCandidatoApto(c, carpetaOferta); err != nil {
+			a.etapa(c, "guardado", estadoError, "no se pudo guardar en candidatos_aptos: "+err.Error(), 0)
+		}
+		if err := a.clasif.GuardarCandidatoApto(c, a.cfg.DirectorioDescargas); err != nil {
+			a.etapa(c, "guardado", estadoError, "no se pudo guardar en el consolidado: "+err.Error(), 0)
+		}
+	}
+	if err := guardarEnBase(a.persistencia, a.oferta, c); err != nil {
+		a.etapa(c, "guardado", estadoError, "no se pudo guardar en la base de datos: "+err.Error(), 0)
+	} else if c.PostulacionID != "" {
+		a.rep.Emitir("candidato.guardado", map[string]any{"indice": c.Indice, "nombre": c.Nombre, "postulacion_id": c.PostulacionID})
+	}
+	a.guardarIA(c)
 }
 
 func (a *Analizador) informarCompleto(c *modelos.Candidato, cache bool) {

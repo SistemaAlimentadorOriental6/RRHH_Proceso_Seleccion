@@ -117,7 +117,7 @@ go build -o rrhh.exe .
 | Endpoint | Descripción |
 |---|---|
 | `GET /api/salud` | Estado del servicio |
-| `GET /api/computrabajo/vacantes[?contar=0]` | Vacantes activas **en vivo** en Computrabajo con `total_candidatos` (inscritos reales; `contar=0` lo omite), `procesada` y `excluida` |
+| `GET /api/computrabajo/vacantes[?contar=0][&refrescar=1]` | Vacantes activas en Computrabajo con `total_candidatos` (inscritos reales), `procesada` y `excluida`. Responde **al instante** con la última lista leída (también tras un reinicio: queda en `descargas/vacantes_computrabajo.json`); si está vieja, le faltan conteos o se pide `refrescar=1`, la actualiza en segundo plano (`X-Vacantes-Fuente: cache-actualizando`) y avisa con el evento `vacantes` de `/api/cambios`. Solo la primera vez, sin lista guardada, lee en vivo (sin conteos) |
 | `GET /api/vacantes` | Vacantes con `slug` (una por slug; gana la carpeta más reciente) |
 | `GET /api/vacantes/{slug}` | Resumen de la vacante |
 | `GET /api/vacantes/{slug}/candidatos?filtro=aptos\|no_aptos&limite=&offset=` | Candidatos (cabecera `X-Total-Count`) |
@@ -132,6 +132,30 @@ Los listados omiten `texto_cv`/`texto_perfil`; use `?incluir_cv=1` para incluirl
 Variables: `RRHH_CORS_ORIGINS` (orígenes permitidos, por defecto los puertos locales de Vite y 8080),
 `RRHH_PRECALENTAR_COMPUTRABAJO=true` (abre Chrome y la sesión al arrancar, para que la primera consulta de vacantes sea rápida), `OLLAMA_CONCURRENCIA` (candidatos evaluados a la vez, por defecto 2) y `SARLAFT_TLS_INSECURE=true`
 (solo si la descarga de la lista ONU falla por certificado).
+
+### Rendimiento y despliegue
+
+- **Frontend servido por Go:** ejecute `pnpm build` en `frontend/` y el servidor entrega `frontend/dist` en la
+  misma dirección que la API (`http://localhost:8080`), con caché larga para `assets/`. `RRHH_FRONTEND_DIR`
+  cambia la carpeta. Es mucho más fluido que `pnpm dev`: el servidor de desarrollo de Vite pide decenas de
+  módulos en cada recarga y compite con los streams en vivo por las 6 conexiones del navegador.
+- **HTTPS / HTTP2:** con `RRHH_TLS_CERT` y `RRHH_TLS_KEY` (rutas al certificado y su clave) el servidor
+  escucha por HTTPS y el navegador usa HTTP/2, que quita el límite de 6 conexiones por servidor.
+- **Sin sondeos:** las pantallas no preguntan cada pocos segundos; `GET /api/cambios` avisa `job` (inicio y
+  fin de cada análisis: `id`, `oferta_id`, `estado`), `vacantes` (la lista cambió) y `cambio`. Una pestaña
+  oculta más de 15 s suelta sus streams y al volver retoma el análisis desde el último evento
+  (`/api/jobs/{id}/eventos?desde=N`).
+- **Base de datos:** aplique `almacen/migraciones/007_indices_lectura.sql` (segura de repetir; es solo un
+  índice y el programa funciona sin ella). Las sesiones validadas se recuerdan 30 s en memoria (cerrar sesión
+  las borra al instante) y la lista de vacantes de la base, 3 s.
+- **Análisis:** quien ya tiene resultado guardado se confirma en su propia fila, sin esperar detrás del
+  análisis (lento) de los nuevos. El resultado de cada persona (`candidato.completo`) sale antes de
+  guardarse en la base; al guardarse llega `candidato.guardado` con su `postulacion_id`.
+- **Unirse a un análisis largo:** si hay 50 o más eventos pendientes se envían compactados (de cada persona
+  su descubrimiento y su resultado; de quien sigue en análisis, la última noticia de cada etapa).
+- **Lista de vacantes:** trae `resumen` (postulados, aptos, no aptos, pendientes) de cada vacante y los
+  conteos de inscritos se publican a medida que se leen (evento `vacantes` con `parcial`).
+- **Listas de candidatos con ETag:** con `If-None-Match` igual a la versión anterior responden `304`.
 
 ## Análisis en vivo de una vacante (SSE)
 
@@ -157,7 +181,7 @@ es.addEventListener('job.completado', () => es.close());
 
 ## Candidatos sin cédula: pausa, solicitud con token y reanudación
 
-Requiere la base de datos (migraciones `almacen/migraciones/001` a `004`, todas seguras de repetir).
+Requiere la base de datos (migraciones `almacen/migraciones/001` a `006`, todas seguras de repetir; `007` es opcional, solo un índice).
 
 Cuando no se puede leer la cédula de un candidato (ficha de Computrabajo, texto del PDF o Word de la hoja de
 vida, perfil impreso, texto de la ficha, o una postulación anterior de la misma persona con el mismo correo y

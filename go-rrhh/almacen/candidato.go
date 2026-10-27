@@ -266,16 +266,16 @@ func (a *Almacen) guardar(ctx context.Context, oferta modelos.OfertaLaboral, c *
 			}
 		}
 
-		// 2. Perfil. genero_inferido es el género que el sistema usó; el declarado y su origen no
+		// 2. Perfil (edad: NULL si no se conoce; no pisa la ya guardada). genero_inferido es el género que el sistema usó; el declarado y su origen no
 		// llegan hasta aquí (el candidato solo trae el resultado final).
 		if err := exec(ctx, tx,
-			`INSERT INTO perfiles (postulacion_id, indice, nombre, slug_persona, genero_inferido, url_detalle, url_cv, url_foto, leido_en)
-			 VALUES (?,?,?,?,?,?,?,?,?)
+			`INSERT INTO perfiles (postulacion_id, indice, nombre, slug_persona, genero_inferido, edad, url_detalle, url_cv, url_foto, leido_en)
+			 VALUES (?,?,?,?,?,?,?,?,?,?)
 			 ON DUPLICATE KEY UPDATE indice = VALUES(indice), nombre = VALUES(nombre), slug_persona = VALUES(slug_persona),
-			   genero_inferido = VALUES(genero_inferido), url_detalle = VALUES(url_detalle), url_cv = VALUES(url_cv),
-			   url_foto = VALUES(url_foto), leido_en = VALUES(leido_en)`,
+			   genero_inferido = VALUES(genero_inferido), edad = COALESCE(VALUES(edad), edad), url_detalle = VALUES(url_detalle),
+			   url_cv = VALUES(url_cv), url_foto = VALUES(url_foto), leido_en = VALUES(leido_en)`,
 			postulacion, c.Indice, texto(c.Nombre, 200), texto(a.slugPersona(c.Nombre), 200), texto(c.Genero, 30),
-			texto(c.URLDetalle, 500), texto(c.URLDescargaCV, 500), texto(c.URLFoto, 500), momento); err != nil {
+			edadParaGuardar(c.Edad), texto(c.URLDetalle, 500), texto(c.URLDescargaCV, 500), texto(c.URLFoto, 500), momento); err != nil {
 			return err
 		}
 

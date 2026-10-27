@@ -33,7 +33,7 @@ type Almacen struct {
 }
 
 // versionEsquema es la última migración que el código necesita ya aplicada.
-const versionEsquema = 5
+const versionEsquema = 6
 
 // Abrir conecta con la base descrita en la configuración y comprueba que tenga el esquema.
 // slug y slugPersona convierten un título de vacante y un nombre en sus slugs
@@ -68,8 +68,11 @@ func Abrir(ctx context.Context, cfg *configuracion.Configuracion, slug, slugPers
 	if err != nil {
 		return nil, fmt.Errorf("abriendo la conexión: %w", err)
 	}
-	db.SetMaxOpenConns(10)
-	db.SetMaxIdleConns(5)
+	// El análisis guarda mientras las pantallas leen: con 10 conexiones las lecturas hacían fila y
+	// retrasaban el guardado de cada candidato. Las ociosas se conservan para no reabrir TCP a la base remota.
+	db.SetMaxOpenConns(20)
+	db.SetMaxIdleConns(20)
+	db.SetConnMaxIdleTime(5 * time.Minute)
 	db.SetConnMaxLifetime(30 * time.Minute)
 
 	a, err := nuevo(ctx, db, k, cfg.DirectorioDescargas, slug, slugPersona)
@@ -102,7 +105,7 @@ func nuevo(ctx context.Context, db *sql.DB, k *claves, descargas string, slug, s
 	if faltan, err := columnasFaltantes(ctx, db); err != nil {
 		return nil, fmt.Errorf("verificando las columnas de la base: %w", err)
 	} else if len(faltan) > 0 {
-		return nil, fmt.Errorf("a la base le faltan columnas (%s): ejecute completos 002, 003, 004 y 005 de almacen/migraciones/, que son seguros de repetir", strings.Join(faltan, ", "))
+		return nil, fmt.Errorf("a la base le faltan columnas (%s): ejecute completos 002 a 006 de almacen/migraciones/, que son seguros de repetir", strings.Join(faltan, ", "))
 	}
 
 	a := &Almacen{db: db, claves: k, descargas: descargas, slug: slug, slugPersona: slugPersona, ofertas: map[string][]byte{}, fuentes: map[string]bool{}}
@@ -128,7 +131,7 @@ var columnasNecesarias = []string{
 	"perfiles.indice", "perfiles.nombre", "perfiles.slug_persona", "perfiles.url_foto",
 	"archivos.etapa", "validaciones.datos", "postulaciones.activa",
 	"solicitudes_datos.token_hash", "datos_declarados.cedula_hmac", "postulacion_historial.tipo",
-	"usuarios.clave_hash", "sesiones.token_hash",
+	"usuarios.clave_hash", "sesiones.token_hash", "perfiles.edad",
 	"evaluaciones_idoneidad.genero", "evaluaciones_idoneidad.detalle_eps",
 	"evaluaciones_idoneidad.detalle_runt", "evaluaciones_idoneidad.detalle_simit",
 }

@@ -61,8 +61,8 @@ func conCORS(siguiente http.Handler) http.Handler {
 			if _, ok := permitidos[origen]; ok || cualquiera {
 				w.Header().Set("Access-Control-Allow-Origin", origen)
 				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, HEAD, OPTIONS")
-				w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Last-Event-ID")
-				w.Header().Set("Access-Control-Expose-Headers", "X-Total-Count, X-Job-ID, Content-Disposition")
+				w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Last-Event-ID, If-None-Match")
+				w.Header().Set("Access-Control-Expose-Headers", "X-Total-Count, X-Job-ID, Content-Disposition, ETag, X-Vacantes-Fuente, X-Vacantes-Edad")
 				w.Header().Set("Access-Control-Max-Age", "600")
 			}
 		}

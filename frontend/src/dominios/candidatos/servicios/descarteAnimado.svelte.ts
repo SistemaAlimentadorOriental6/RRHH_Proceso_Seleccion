@@ -7,6 +7,8 @@
  * bucle de movimiento del avatar), así el recorrido siempre se completa y va a su ritmo.
  */
 
+import { SvelteSet } from 'svelte/reactivity';
+
 type Fase = 'agarrando' | 'llevando' | 'soltando' | 'listo';
 export type ModoLlevar = 'descartar' | 'analizar';
 export type ResultadoLlevar = 'iniciado' | 'ocupado' | 'sin-animacion';
@@ -28,6 +30,12 @@ interface Vuelo {
   ultimoDestino: DOMRect | null;
   desplazado: boolean;
 }
+
+/**
+ * Tarjetas que Adi ya llevó (o que ya no hay que llevar). Vive aquí y no en la pantalla: al cambiar de
+ * pantalla y volver, la vista se crea de nuevo y, si esta lista se perdiera, volvería a llevar todo.
+ */
+export const despachados = new SvelteSet<string>();
 
 /** Reactivo: el avatar lo observa para despertar su bucle y reaccionar. */
 export const vuelo = $state<{ activo: boolean; fase: Fase | null; modo: ModoLlevar | null }>({

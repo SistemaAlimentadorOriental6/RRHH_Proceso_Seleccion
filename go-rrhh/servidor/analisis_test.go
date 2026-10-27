@@ -4,12 +4,17 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"net/http"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
+	"go-rrhh/agentes"
 	"go-rrhh/modelos"
 	"go-rrhh/orquestador"
+	"go-rrhh/utilidades"
 )
 
 // fuenteAnalisisFalsa simula Computrabajo: tres postulados, uno por cada camino del análisis.
@@ -186,6 +191,37 @@ func TestAnalisisSSEDescarteTemprano(t *testing.T) {
 	}
 }
 
+// El inicio y el final de cada análisis llegan por /api/cambios: la pantalla no necesita sondear /api/jobs.
+func TestAnalisisAvisaInicioYFinPorCambios(t *testing.T) {
+	ctrl, srv := montarControladorAnalisis(t, &fuenteAnalisisFalsa{}, orquestador.Validadores{})
+	avisos, desuscribir := ctrl.cambios.suscribir()
+	defer desuscribir()
+
+	pedir(srv.rutas(), "GET", "/api/computrabajo/vacantes/"+idOfertaPrueba+"/analizar?limite=1", nil)
+	var estados []string
+	limite := time.After(3 * time.Second) // el aviso final sale justo después de cerrar el stream
+	for len(estados) < 2 {
+		var av aviso
+		select {
+		case av = <-avisos:
+		case <-limite:
+			t.Fatalf("faltan avisos de job: %v", estados)
+		}
+		if av.evento != "job" {
+			continue
+		}
+		var d map[string]string
+		_ = json.Unmarshal([]byte(av.datos), &d)
+		if d["oferta_id"] != idOfertaPrueba || d["id"] == "" {
+			t.Errorf("aviso sin la vacante o el id: %s", av.datos)
+		}
+		estados = append(estados, d["estado"])
+	}
+	if len(estados) != 2 || estados[0] != jobEnCurso || estados[1] == jobEnCurso {
+		t.Errorf("avisos de job: %v", estados)
+	}
+}
+
 func TestAnalisisValidaciones(t *testing.T) {
 	_, srv := montarControladorAnalisis(t, &fuenteAnalisisFalsa{}, orquestador.Validadores{})
 	h := srv.rutas()
@@ -337,5 +373,131 @@ func TestAnalisisConsultaCaidaQuedaPendiente(t *testing.T) {
 	_ = pedir(h, "GET", ruta, nil)
 	if llamadasAdres.Load() == antes {
 		t.Error("el candidato pendiente debía reprocesarse, no tomarse de la caché")
+	}
+}
+
+// fuenteLenta tarda en leer la ficha de los nuevos, como Computrabajo con captchas.
+type fuenteLenta struct {
+	fuenteAnalisisFalsa
+	espera atomic.Int64 // milisegundos
+}
+
+func (f *fuenteLenta) ExtraerDetalleCandidato(ctx context.Context, c *modelos.Candidato, carpeta string) error {
+	time.Sleep(time.Duration(f.espera.Load()) * time.Millisecond)
+	return f.fuenteAnalisisFalsa.ExtraerDetalleCandidato(ctx, c, carpeta)
+}
+
+// Un candidato ya analizado se confirma enseguida aunque delante haya uno nuevo cuyo análisis tarda.
+func TestAnalisisReutilizadosNoEsperanALosNuevos(t *testing.T) {
+	fuente := &fuenteLenta{}
+	ctrl, srv := montarControladorAnalisis(t, fuente, orquestador.Validadores{
+		Runt: func(ctx context.Context, c *modelos.Candidato) error {
+			c.ResultadoRunt = &modelos.ResultadoRunt{Estado: "INSCRITO_ACTIVO", Inscrito: true, FechaInscripcion: "2015-01-01"}
+			return nil
+		},
+		Simit: func(ctx context.Context, c *modelos.Candidato) error {
+			c.ResultadoSimit = &modelos.ResultadoSimit{Estado: "OK", PazYSalvo: true, TotalDeuda: "$ 0"}
+			return nil
+		},
+		Adres: func(ctx context.Context, c *modelos.Candidato) error {
+			c.ResultadoAdres = &modelos.ResultadoAdres{Estado: "OK", EPS: "SURA", EstadoAfiliacion: "ACTIVO"}
+			return nil
+		},
+	})
+	h := srv.rutas()
+	ruta := "/api/computrabajo/vacantes/" + idOfertaPrueba + "/analizar?antecedentes=0&sarlaft=0&ofac=0"
+	if rr := pedir(h, "GET", ruta, nil); rr.Code != 200 {
+		t.Fatalf("primer análisis: %d", rr.Code)
+	}
+
+	// Solo Juan (el último del listado) queda guardado; Carlos y María vuelven a ser nuevos y lentos.
+	archivo := filepath.Join(ctrl.cfg.DirectorioDescargas, agentes.LimpiarNombre("Conductor de pruebas SSE"), "candidatos.json")
+	var lista []modelos.Candidato
+	if err := utilidades.LeerJSON(archivo, &lista); err != nil {
+		t.Fatal(err)
+	}
+	var soloJuan []modelos.Candidato
+	for _, c := range lista {
+		if strings.HasPrefix(c.Nombre, "Juan") {
+			soloJuan = append(soloJuan, c)
+		}
+	}
+	if len(soloJuan) != 1 {
+		t.Fatalf("candidatos guardados: %+v", lista)
+	}
+	if err := utilidades.EscribirJSONAtomico(archivo, soloJuan, false); err != nil {
+		t.Fatal(err)
+	}
+
+	fuente.espera.Store(300)
+	var completos []string
+	for _, ev := range leerSSE(t, pedir(h, "GET", ruta, nil).Body.String()) {
+		if ev.tipo == "candidato.completo" {
+			var c modelos.Candidato
+			_ = json.Unmarshal([]byte(ev.datos), &c)
+			completos = append(completos, c.Nombre)
+		}
+	}
+	if len(completos) != 3 || completos[0] != "Juan Gomez" {
+		t.Errorf("Juan (guardado) debía confirmarse primero: %v", completos)
+	}
+}
+
+// Al unirse a un análisis largo no se repiten las etapas intermedias: llega lo justo para reconstruirlo.
+func TestRepeticionCompactada(t *testing.T) {
+	job := nuevoJobAnalisis(idOfertaPrueba, "Vacante")
+	job.Emitir("job.iniciado", map[string]any{"job_id": job.ID})
+	for i := 1; i <= 20; i++ {
+		job.Emitir("candidato.descubierto", map[string]any{"indice": i, "nombre": "P"})
+		for _, etapa := range []string{"perfil", "adres", "runt"} {
+			job.Emitir("candidato.etapa", map[string]any{"indice": i, "etapa": etapa, "estado": "iniciada"})
+			job.Emitir("candidato.etapa", map[string]any{"indice": i, "etapa": etapa, "estado": "ok"})
+		}
+		if i < 20 { // el 20 sigue en análisis
+			job.Emitir("candidato.completo", map[string]any{"indice": i, "nombre": "P"})
+			job.Emitir("resumen", map[string]any{"procesados": i})
+		}
+	}
+	total := job.estadoJob().Eventos
+
+	pendientes, _ := job.desde(0)
+	tipos := map[string]int{}
+	for _, ev := range pendientes {
+		tipos[ev.tipo]++
+		if ev.tipo == "candidato.etapa" && ev.indice != 20 {
+			t.Errorf("etapa de alguien que ya terminó: %s", ev.datos)
+		}
+	}
+	if tipos["candidato.descubierto"] != 20 || tipos["candidato.completo"] != 19 || tipos["resumen"] != 1 || tipos["candidato.etapa"] != 3 {
+		t.Errorf("eventos compactados: %v (de %d)", tipos, total)
+	}
+	if !strings.Contains(string(pendientes[len(pendientes)-1].datos), `"estado":"ok"`) || pendientes[len(pendientes)-1].id != total {
+		t.Errorf("el último evento debe conservarse con su id: %+v", pendientes[len(pendientes)-1])
+	}
+	// En vivo (pocos pendientes) se envía todo tal cual.
+	if p, _ := job.desde(total - 3); len(p) != 3 {
+		t.Errorf("en vivo no se compacta: %d", len(p))
+	}
+}
+
+// Un refresco sin cambios responde 304 sin cuerpo; si algo cambia, el contenido nuevo con otro ETag.
+func TestCandidatosGuardadosConETag(t *testing.T) {
+	_, srv := montarControladorAnalisis(t, &fuenteAnalisisFalsa{}, validadoresQueCumplen())
+	h := srv.rutas()
+	pedir(h, "GET", "/api/computrabajo/vacantes/"+idOfertaPrueba+"/analizar?limite=1&antecedentes=0&sarlaft=0&ofac=0", nil)
+	ruta := "/api/computrabajo/vacantes/" + idOfertaPrueba + "/candidatos"
+
+	rr := pedir(h, "GET", ruta, nil)
+	etag := rr.Header().Get("ETag")
+	if rr.Code != 200 || etag == "" {
+		t.Fatalf("primera lectura: %d, etag %q", rr.Code, etag)
+	}
+	rr = pedir(h, "GET", ruta, map[string]string{"If-None-Match": etag})
+	if rr.Code != http.StatusNotModified || rr.Body.Len() != 0 {
+		t.Errorf("sin cambios debía ser 304 vacío: %d %q", rr.Code, rr.Body.String())
+	}
+	pedir(h, "GET", "/api/computrabajo/vacantes/"+idOfertaPrueba+"/analizar?antecedentes=0&sarlaft=0&ofac=0", nil)
+	if rr = pedir(h, "GET", ruta, map[string]string{"If-None-Match": etag}); rr.Code != 200 || rr.Header().Get("ETag") == etag {
+		t.Errorf("con candidatos nuevos debía responder 200 con otro ETag: %d", rr.Code)
 	}
 }

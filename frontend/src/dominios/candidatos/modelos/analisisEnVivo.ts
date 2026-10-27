@@ -16,6 +16,16 @@ export interface VacanteApi {
   ids_miembros?: string[];
   /** Solo en vacantes agrupadas: cuántas de las personas del total llegaron por correo. */
   total_correo?: number;
+  /** Totales de lo ya analizado (de la base); ausente si la vacante no tiene nada analizado. */
+  resumen?: ResumenAnalizadosApi;
+}
+
+export interface ResumenAnalizadosApi {
+  postulados: number;
+  aptos: number;
+  /** Sin contar los de verificación pendiente. */
+  no_aptos: number;
+  pendientes: number;
 }
 
 export type IdEtapa =

@@ -19,6 +19,10 @@ export class ErrorApi extends Error {
 }
 
 async function pedirJson<T>(ruta: string, init?: RequestInit): Promise<T> {
+  return (await pedirJsonConCabeceras<T>(ruta, init)).datos;
+}
+
+async function pedirJsonConCabeceras<T>(ruta: string, init?: RequestInit): Promise<{ datos: T; cabeceras: Headers }> {
   let respuesta: Response;
   try {
     respuesta = await fetch(`${BASE_API}${ruta}`, init);
@@ -26,6 +30,7 @@ async function pedirJson<T>(ruta: string, init?: RequestInit): Promise<T> {
     if (error instanceof DOMException && error.name === 'AbortError') throw error;
     throw new ErrorApi('No hay conexión con el servidor RRHH (¿está corriendo en el puerto 8080?)', 0);
   }
+  if (respuesta.status === 304) return { datos: null as T, cabeceras: respuesta.headers }; // sin cambios
   if (!respuesta.ok) {
     if (respuesta.status === 401) window.dispatchEvent(new Event(EVENTO_SESION_EXPIRADA));
     let mensaje = `El servidor respondió ${respuesta.status}`;
@@ -37,29 +42,50 @@ async function pedirJson<T>(ruta: string, init?: RequestInit): Promise<T> {
     }
     throw new ErrorApi(mensaje, respuesta.status);
   }
-  return (await respuesta.json()) as T;
+  return { datos: (await respuesta.json()) as T, cabeceras: respuesta.headers };
+}
+
+export interface ListaVacantesApi {
+  vacantes: VacanteApi[];
+  /** El servidor la está actualizando en segundo plano: avisará por /api/cambios (evento "vacantes"). */
+  actualizando: boolean;
+  /** Cuándo leyó el servidor esta lista (ms desde epoch). */
+  leidaEn: number;
 }
 
 /**
- * Vacantes activas en Computrabajo. Con contar=false responde rápido (sin abrir el listado de cada
- * vacante) y total_candidatos viene en null; con contar=true cuenta los inscritos reales y puede tardar.
+ * Vacantes activas en Computrabajo. El servidor responde al instante con la última lista leída y, si
+ * está vieja o le faltan los conteos de inscritos, la actualiza en segundo plano. refrescar=true pide
+ * esa actualización aunque la lista sea reciente (botón de recargar).
  */
-export function listarVacantes(contar: boolean, senal?: AbortSignal): Promise<VacanteApi[]> {
-  return pedirJson<VacanteApi[]>(
-    `/api/computrabajo/vacantes${contar ? '' : '?contar=0'}`,
+export async function listarVacantes(refrescar: boolean, senal?: AbortSignal): Promise<ListaVacantesApi> {
+  const { datos, cabeceras } = await pedirJsonConCabeceras<VacanteApi[]>(
+    `/api/computrabajo/vacantes${refrescar ? '?refrescar=1' : ''}`,
     { signal: senal }
   );
+  const edad = Number(cabeceras.get('X-Vacantes-Edad') ?? 0);
+  return {
+    vacantes: datos,
+    actualizando: (cabeceras.get('X-Vacantes-Fuente') ?? '').includes('actualizando'),
+    leidaEn: Date.now() - (Number.isFinite(edad) ? edad : 0) * 1000
+  };
 }
 
-/** Candidatos ya analizados y guardados de una vacante (por su id, no por slug). */
-export function listarCandidatosGuardados(
+/**
+ * Candidatos ya analizados y guardados de una vacante (por su id, no por slug). Con la versión de la
+ * lectura anterior (etag), si nada cambió el servidor responde 304 y aquí llega candidatos=null.
+ */
+export async function listarCandidatosGuardados(
   idVacante: string,
+  etag?: string | null,
   senal?: AbortSignal
-): Promise<CandidatoApi[]> {
-  return pedirJson<CandidatoApi[]>(
+): Promise<{ candidatos: CandidatoApi[] | null; etag: string | null }> {
+  const { datos, cabeceras } = await pedirJsonConCabeceras<CandidatoApi[] | null>(
     `/api/computrabajo/vacantes/${encodeURIComponent(idVacante)}/candidatos`,
-    { signal: senal }
+    // no-store: la versión la lleva la pantalla, así el 304 llega aquí en vez de resolverlo la caché.
+    { signal: senal, cache: 'no-store', headers: etag ? { 'If-None-Match': etag } : undefined }
   );
+  return { candidatos: datos, etag: cabeceras.get('ETag') ?? etag ?? null };
 }
 
 export interface ContactoCandidatoApi {
@@ -141,8 +167,8 @@ export function urlAnalisis(idVacante: string, opciones: OpcionesAnalisisApi): s
 }
 
 /** Eventos (en vivo y repetidos desde el inicio) de un análisis que ya existe; no crea uno nuevo. */
-export function urlEventosJob(idJob: string): string {
-  return `${BASE_API}/api/jobs/${encodeURIComponent(idJob)}/eventos`;
+export function urlEventosJob(idJob: string, desde = 0): string {
+  return `${BASE_API}/api/jobs/${encodeURIComponent(idJob)}/eventos${desde > 0 ? `?desde=${desde}` : ''}`;
 }
 
 /** Descarga un .zip con los aptos de esas vacantes: aptos.csv (nombre, cédula, teléfono, correo) y sus hojas de vida. */

@@ -11,7 +11,7 @@
   import { estaSilenciado, guardarSilencio, sonar, type Sonido } from "../servicios/sonidosAvatar";
 
   interface Propiedades {
-    sesion: { activo: boolean; estado: string; candidatos: CandidatoEnVivo[] };
+    sesion: { activo: boolean; estado: string; candidatos: CandidatoEnVivo[]; repitiendo?: boolean };
   }
   let { sesion }: Propiedades = $props();
 
@@ -152,6 +152,7 @@
   }
   let guardia = $state(GUARDIA[0]);
   let globo = $state<string | null>(null);
+  let globoAlaDerecha = $state(false); // no cabe a la izquierda del avatar sin salirse de la pantalla
   let temporizador: ReturnType<typeof setTimeout> | undefined;
   let temporizadorGlobo: ReturnType<typeof setTimeout> | undefined;
   let prioridadActual = 0;
@@ -250,11 +251,14 @@
     const nuevas = new Map<string, Foto>();
     const previas = fotos;
     const activo = sesion.activo;
+    // Lo que el servidor repite al unirse a un análisis ya en marcha no es una novedad: no se reacciona
+    // (antes soltaba ráfagas de frases y sonidos al recargar).
+    const repitiendo = sesion.repitiendo ?? false;
     for (const c of sesion.candidatos) {
       const etapas: Foto["etapas"] = {};
       for (const e of ORDEN_ETAPAS) etapas[e] = c.etapas[e]?.estado;
       nuevas.set(c.slug, { fase: c.fase, etapas });
-      if (!previas || !activo || c.desdeCache) continue;
+      if (!previas || !activo || c.desdeCache || repitiendo) continue;
       const antes = previas.get(c.slug);
       if (!antes) {
         reaccionar("curious", 1200, false, 1, "nuevo");
@@ -444,6 +448,7 @@
     origenPuntero = { x: e.clientX, y: e.clientY };
     huboArrastre = false;
     agarrada = true;
+    percha = PERCHAS[0]; // al soltarla vuelve a su sitio de siempre
     punteroId = e.pointerId;
     contenedor.setPointerCapture(e.pointerId);
   }
@@ -523,6 +528,11 @@
   let y = 0;
   let vx = 0;
   let vy = 0;
+  let px = 0; // destino suavizado hacia el que tira el resorte
+  let py = 0;
+  let inclinacion = 0;
+  let ultimoCambioViaje = 0;
+  const VELOCIDAD_MAXIMA = 1500; // px/s
   let mx = 0;
   let my = 0;
   let cuadro = 0;
@@ -554,8 +564,78 @@
     return objetivo;
   }
 
-  function destino(t: number): { x: number; y: number } {
-    const a = ancla.getBoundingClientRect();
+  // Dónde se posa sobre la tarjeta que acompaña: fx recorre el borde (0 izquierda, 1 derecha) y `abajo`
+  // elige el borde de abajo (casi todo fuera de la tarjeta, para no tapar sus botones). La primera es su
+  // sitio de siempre y la que usa para agarrar la tarjeta (ver kirbyInicial en descarteAnimado).
+  type Percha = { fx: number; abajo: boolean };
+  const PERCHAS: Percha[] = [
+    { fx: 1, abajo: false },
+    { fx: 0.5, abajo: false },
+    { fx: 0, abajo: false },
+    { fx: 1, abajo: true },
+    { fx: 0.5, abajo: true },
+    { fx: 0, abajo: true },
+  ];
+  let percha = PERCHAS[0];
+
+  type Area = { left: number; top: number; right: number; bottom: number };
+  let areaEl: Element | null = null;
+  let globoEl = $state<HTMLDivElement | undefined>(); // el globo de pensamiento, si hay uno (bind:this)
+
+  /**
+   * Área que de verdad se ve (la del scroll de la página), para que ni Adi ni su globo queden cortados.
+   * Se mide una vez y se recuerda hasta que cambia el tamaño o se desplaza algo: antes se medía en cada
+   * cuadro de la animación.
+   */
+  let areaMedida: Area | null = null;
+  let vigiaArea: ResizeObserver | null = null;
+  function areaVisible(): Area {
+    if (areaMedida) return areaMedida;
+    if (!areaEl) {
+      areaEl = ancla.closest(".area-principal");
+      if (areaEl && typeof ResizeObserver !== "undefined") {
+        vigiaArea = new ResizeObserver(() => (areaMedida = null));
+        vigiaArea.observe(areaEl);
+      }
+    }
+    const r = areaEl?.getBoundingClientRect();
+    areaMedida = {
+      left: Math.max(r?.left ?? 0, 0),
+      top: Math.max(r?.top ?? 0, 0),
+      right: Math.min(r?.right ?? innerWidth, innerWidth),
+      bottom: Math.min(r?.bottom ?? innerHeight, innerHeight),
+    };
+    return areaMedida;
+  }
+  $effect(() => {
+    const olvidar = () => (areaMedida = null);
+    addEventListener("resize", olvidar, { passive: true });
+    addEventListener("scroll", olvidar, { passive: true, capture: true }); // el área puede moverse con la página
+    return () => {
+      removeEventListener("resize", olvidar);
+      removeEventListener("scroll", olvidar, { capture: true });
+      vigiaArea?.disconnect();
+    };
+  });
+
+  /** Mantiene a Adi (con el tamaño que tenga ahora y su globo) dentro del área visible. */
+  function dentroDelArea(p: { x: number; y: number }, a: DOMRect, r: Area): { x: number; y: number } {
+    const s = harta ? 2.15 : grande ? 1.75 : 1; // crece desde el 50 % / 85 % de su caja
+    const lado = (TAM * (s - 1)) / 2;
+    const arriba = TAM * 0.85 * (s - 1);
+    const abajo = TAM * 0.15 * (s - 1);
+    const altoGlobo = globoEl ? Math.max(0, globoEl.offsetHeight - TAM * 0.42) : 0;
+    const M = 8;
+    const minX = r.left + M + lado - a.left;
+    const maxX = Math.max(minX, r.right - M - lado - TAM - a.left);
+    const minY = r.top + M + arriba + altoGlobo - a.top;
+    const maxY = Math.max(minY, r.bottom - M - abajo - TAM - a.top);
+    // Lejos de la pantalla (la tarjeta está scrolleada fuera) no se ancla al borde: se va con su tarjeta.
+    const lejos = a.top + p.y + TAM < r.top - 120 || a.top + p.y > r.bottom + 120;
+    return { x: Math.min(Math.max(p.x, minX), maxX), y: lejos ? p.y : Math.min(Math.max(p.y, minY), maxY) };
+  }
+
+  function destino(t: number, a: DOMRect, area: Area): { x: number; y: number } {
     // Agarrada: va tras el puntero, tal como la tomaron.
     if (arrastrando) return { x: mx - agarreDX - TAM / 2 - a.left, y: my - agarreDY - TAM / 2 - a.top };
     // Llevando una tarjeta a "Descartados": va hacia la entrada del menú, aunque esté fuera de su vacante.
@@ -563,17 +643,53 @@
     if (llevado) return { x: llevado.cx - TAM / 2 - a.left, y: llevado.cy - TAM / 2 - a.top };
     const tarjeta = elegirObjetivo();
     const slug = tarjeta?.dataset.slug ?? null;
-    if (slug !== seguido) seguido = slug;
+    if (slug !== seguido) {
+      seguido = slug;
+      percha = PERCHAS[0]; // otra tarjeta: llega a su sitio de siempre
+    }
     const flota = sesion.activo ? Math.sin(t / 650) * 3 : 0;
     if (!tarjeta) {
       // En su sitio: se asoma un poco hacia donde está el mouse.
       const cx = a.left + a.width / 2;
       const cy = a.top + a.height / 2;
-      return { x: limitar((mx - cx) * 0.06, 16), y: limitar((my - cy) * 0.06, 10) + flota };
+      return dentroDelArea({ x: limitar((mx - cx) * 0.06, 16), y: limitar((my - cy) * 0.06, 10) + flota }, a, area);
     }
     const d = tarjeta.getBoundingClientRect();
-    return { x: d.right - TAM - 14 - a.left, y: d.top - TAM * 0.55 - a.top + flota };
+    // Si la tarjeta espera a que la lleve, se queda en la esquina desde donde la agarra.
+    const p = tarjeta.dataset.espera === "true" ? PERCHAS[0] : percha;
+    const recorrido = Math.max(d.width - TAM - 28, 0);
+    const izquierda = d.right - TAM - 14 - (1 - p.fx) * recorrido;
+    const arriba = p.abajo ? d.bottom - TAM * 0.3 : d.top - TAM * 0.55;
+    return dentroDelArea({ x: izquierda - a.left, y: arriba - a.top + flota }, a, area);
   }
+
+  /** Libre para pasear: nada la está moviendo, llevando una tarjeta ni esperando para hacerlo. */
+  function puedePasear(): boolean {
+    return (
+      !!objetivo?.isConnected &&
+      objetivo.dataset.espera !== "true" &&
+      !arrastrando && !agarrada && !volviendo && !harta && !grande && !vuelo.activo && !reducido
+    );
+  }
+
+  // De vez en cuando (no siempre) cambia de lugar sobre la tarjeta que acompaña. Solo toca `percha`:
+  // al agarrar, arrastrar o llevar una tarjeta, destino() ya no la mira.
+  $effect(() => {
+    let paseo: ReturnType<typeof setTimeout>;
+    const programar = () => {
+      paseo = setTimeout(() => {
+        if (puedePasear() && Math.random() < 0.6) {
+          const otras = PERCHAS.filter((p) => p !== percha);
+          // A veces vuelve a su sitio de siempre; si no, elige otro lugar al azar.
+          percha = percha !== PERCHAS[0] && Math.random() < 0.35 ? PERCHAS[0] : azar(otras);
+          arrancar();
+        }
+        programar();
+      }, 6000 + Math.random() * 8000);
+    };
+    programar();
+    return () => clearTimeout(paseo);
+  });
 
   function paso(t: number) {
     cuadro = 0;
@@ -590,46 +706,76 @@
     pasarAlBody(vuelo.activo || arrastrando || volviendo); // se hace aquí, en el bucle: es lo que mueve la tarjeta, así van siempre a la par
     const dt = Math.min((t - ultimo) / 1000 || 0.016, 0.05);
     ultimo = t;
-    const d = destino(t);
+    // Una sola medición del DOM por cuadro (antes eran de 5 a 7, y con las tarjetas animándose hacía tirones).
+    const a = ancla.getBoundingClientRect();
+    const area = areaVisible();
+    const d = destino(t, a, area);
     if (arrastrando) {
       // Sin resorte: sigue al puntero al instante; la velocidad solo sirve para inclinarla al moverla.
       vx = lerp(vx, (d.x - x) / Math.max(dt, 0.001), 0.3);
       vy = lerp(vy, (d.y - y) / Math.max(dt, 0.001), 0.3);
-      x = d.x;
-      y = d.y;
+      x = px = d.x;
+      y = py = d.y;
     } else if (reducido) {
-      x = d.x;
-      y = d.y;
+      x = px = d.x;
+      y = py = d.y;
       vx = vy = 0;
     } else {
-      const rigidez = 55;
-      const amortiguacion = 2 * Math.sqrt(rigidez) * 0.95;
-      vx += (rigidez * (d.x - x) - amortiguacion * vx) * dt;
-      vy += (rigidez * (d.y - y) - amortiguacion * vy) * dt;
+      // Llevando una tarjeta el destino se sigue tal cual (la tarjeta cuelga de Adi); el resto del tiempo
+      // el destino se suaviza primero, así sale y llega con aceleración suave en vez de arrancar de golpe,
+      // y los saltos del destino (otra tarjeta, otra percha, límites del área) no se notan como tirones.
+      if (vuelo.activo) {
+        px = d.x;
+        py = d.y;
+      } else {
+        const suavizado = 1 - Math.exp(-dt / 0.16);
+        px += (d.x - px) * suavizado;
+        py += (d.y - py) * suavizado;
+      }
+      // Resorte críticamente amortiguado: llega sin rebotar ni quedarse temblando.
+      const rigidez = vuelo.activo ? 55 : 34;
+      const amortiguacion = 2 * Math.sqrt(rigidez);
+      vx += (rigidez * (px - x) - amortiguacion * vx) * dt;
+      vy += (rigidez * (py - y) - amortiguacion * vy) * dt;
+      const rapidez = Math.hypot(vx, vy);
+      if (rapidez > VELOCIDAD_MAXIMA) {
+        vx *= VELOCIDAD_MAXIMA / rapidez;
+        vy *= VELOCIDAD_MAXIMA / rapidez;
+      }
       x += vx * dt;
       y += vy * dt;
     }
     const velocidad = Math.hypot(vx, vy);
-    if (!enViaje && velocidad > 500) enViaje = true;
-    else if (enViaje && velocidad < 150) enViaje = false;
-    if (enBody) {
-      const a = ancla.getBoundingClientRect();
-      volador.style.transform = `translate3d(${(a.left + x).toFixed(2)}px, ${(a.top + y).toFixed(2)}px, 0)`;
-    } else {
-      volador.style.transform = `translate3d(${x.toFixed(2)}px, ${y.toFixed(2)}px, 0)`;
+    // "Emocionado" al viajar rápido, con histéresis y un mínimo entre cambios para que no parpadee.
+    if (t - ultimoCambioViaje > 450) {
+      if (!enViaje && velocidad > 650) (enViaje = true), (ultimoCambioViaje = t);
+      else if (enViaje && velocidad < 220) (enViaje = false), (ultimoCambioViaje = t);
     }
-    contenedor.style.transform = `rotate(${limitar(vx * 0.02, 14).toFixed(2)}deg)`;
+    volador.style.transform = enBody
+      ? `translate3d(${(a.left + x).toFixed(2)}px, ${(a.top + y).toFixed(2)}px, 0)`
+      : `translate3d(${x.toFixed(2)}px, ${y.toFixed(2)}px, 0)`;
+    // Se inclina hacia donde va, pero suavizado: no reacciona a cada variación de velocidad.
+    inclinacion += (limitar(vx * 0.014, 10) - inclinacion) * (1 - Math.exp(-dt / 0.09));
+    contenedor.style.transform = `rotate(${inclinacion.toFixed(2)}deg)`;
+    if (globoEl) {
+      // El globo sale a la izquierda; si ahí no cabe en pantalla, sale a la derecha.
+      const sinSitio = a.left + x - area.left < globoEl.offsetWidth + 16;
+      if (sinSitio !== globoAlaDerecha) globoAlaDerecha = sinSitio;
+    }
     const quieto = Math.abs(d.x - x) < 0.3 && Math.abs(d.y - y) < 0.3 && velocidad < 1;
     if (vuelo.activo) {
-      const a = ancla.getBoundingClientRect();
       actualizar(t, { cx: a.left + x + TAM / 2, cy: a.top + y + TAM / 2, vx, vy });
     }
     if (volviendo && quieto) alLlegarAlSitio();
-    if (sesion.activo || vuelo.activo || arrastrando || volviendo || !quieto) cuadro = requestAnimationFrame(paso);
+    // Fuera de pantalla no se anima (cada cuadro mide el DOM); al volver a verse se retoma.
+    const seguir = (sesion.activo && visible) || vuelo.activo || arrastrando || volviendo || (!quieto && visible);
+    if (seguir) cuadro = requestAnimationFrame(paso);
   }
 
   function arrancar() {
     if (!cuadro) {
+      px = x; // el destino suavizado parte de donde está
+      py = y;
       ultimo = performance.now();
       cuadro = requestAnimationFrame(paso);
     }
@@ -638,8 +784,20 @@
   function alMoverMouse(e: PointerEvent) {
     mx = e.clientX;
     my = e.clientY;
-    arrancar();
+    if (visible) arrancar(); // solo se asoma hacia el mouse si se la ve
   }
+
+  /** Adi está en pantalla: fuera de ella no hace falta moverla. */
+  let visible = true;
+  $effect(() => {
+    if (typeof IntersectionObserver === "undefined") return;
+    const observador = new IntersectionObserver(([entrada]) => {
+      visible = entrada.isIntersecting;
+      if (visible) arrancar();
+    }, { rootMargin: "120px" });
+    observador.observe(ancla);
+    return () => observador.disconnect();
+  });
 
   $effect(() => {
     void sesion.activo;
@@ -652,7 +810,7 @@
     addEventListener("pointermove", alMoverMouse, { passive: true });
     // Revisa cada segundo que el bucle siga vivo: si por lo que sea se detuvo con trabajo pendiente, lo retoma.
     const vigilante = setInterval(() => {
-      if (!cuadro && (sesion.activo || vuelo.activo || ancla?.closest(".tarjeta-vacante")?.querySelector(ACTIVA))) arrancar();
+      if (!cuadro && (vuelo.activo || (visible && (sesion.activo || ancla?.closest(".tarjeta-vacante")?.querySelector(ACTIVA))))) arrancar();
     }, 1000);
     return () => {
       removeEventListener("pointermove", alMoverMouse);
@@ -687,7 +845,8 @@
         <div
           class="globo"
           class:grande={grande || harta}
-          class:derecha={!seguido}
+          class:derecha={!seguido || globoAlaDerecha}
+          bind:this={globoEl}
           role="status"
           in:globoTransicion
           out:globoTransicion={{ saliendo: true }}
@@ -756,6 +915,13 @@
 
   .avatar-analisis.agarrada {
     cursor: grabbing;
+  }
+
+  /* El dibujo (viewBox -150..150) se recortaba en los bordes de su caja de 72 px al saltar, inclinarse o
+     crecer, porque un <svg> corta lo que se sale por defecto. */
+  .avatar-analisis :global(.bs-avatar),
+  .avatar-analisis :global(.bs-avatar svg) {
+    overflow: visible;
   }
 
   /* Harta: más grande todavía, tiembla y no se deja agarrar. */

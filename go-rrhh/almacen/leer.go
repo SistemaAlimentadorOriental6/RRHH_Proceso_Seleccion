@@ -18,13 +18,17 @@ type OfertaProcesada struct {
 	IDComputrabajo string
 	Titulo, Slug   string
 	Total, Aptos   int
+	Pendientes     int // no aptos con verificación pendiente
 	ActualizadoEn  time.Time
 }
 
 // OfertasProcesadas lista las vacantes que tienen postulantes vigentes, con sus totales.
 func (a *Almacen) OfertasProcesadas(ctx context.Context) ([]OfertaProcesada, error) {
 	filas, err := a.db.QueryContext(ctx,
-		`SELECT o.id_computrabajo, o.titulo, o.slug, COUNT(*), COALESCE(SUM(po.dictamen = 'apto'), 0), MAX(po.actualizado_en)
+		`SELECT o.id_computrabajo, o.titulo, o.slug, COUNT(*), COALESCE(SUM(po.dictamen = 'apto'), 0),
+		        COALESCE(SUM(po.dictamen <> 'apto' AND EXISTS (SELECT 1 FROM evaluaciones_idoneidad ev
+		                  WHERE ev.postulacion_id = po.id AND ev.vigente = 1 AND ev.verificacion_pendiente = 1)), 0),
+		        MAX(po.actualizado_en)
 		   FROM ofertas o JOIN postulaciones po ON po.oferta_id = o.id AND po.activa = 1
 		  GROUP BY o.id, o.id_computrabajo, o.titulo, o.slug`)
 	if err != nil {
@@ -36,7 +40,7 @@ func (a *Almacen) OfertasProcesadas(ctx context.Context) ([]OfertaProcesada, err
 	for filas.Next() {
 		var o OfertaProcesada
 		var actualizado sql.NullTime
-		if err := filas.Scan(&o.IDComputrabajo, &o.Titulo, &o.Slug, &o.Total, &o.Aptos, &actualizado); err != nil {
+		if err := filas.Scan(&o.IDComputrabajo, &o.Titulo, &o.Slug, &o.Total, &o.Aptos, &o.Pendientes, &actualizado); err != nil {
 			return nil, err
 		}
 		o.ActualizadoEn = actualizado.Time
@@ -48,6 +52,16 @@ func (a *Almacen) OfertasProcesadas(ctx context.Context) ([]OfertaProcesada, err
 // CandidatosDeOferta devuelve los candidatos vigentes de una vacante, reconstruidos con la misma
 // forma que tenían en candidatos.json. Una vacante desconocida devuelve una lista vacía.
 func (a *Almacen) CandidatosDeOferta(ctx context.Context, idComputrabajo string) ([]modelos.Candidato, error) {
+	return a.candidatosVigentes(ctx, idComputrabajo, true)
+}
+
+// CandidatosDeOfertaSinTexto es CandidatosDeOferta sin leer del disco el texto de cada perfil: es lo
+// que piden las pantallas (el texto pesa varios KB por persona y no se muestra en las listas).
+func (a *Almacen) CandidatosDeOfertaSinTexto(ctx context.Context, idComputrabajo string) ([]modelos.Candidato, error) {
+	return a.candidatosVigentes(ctx, idComputrabajo, false)
+}
+
+func (a *Almacen) candidatosVigentes(ctx context.Context, idComputrabajo string, conTexto bool) ([]modelos.Candidato, error) {
 	var ofertaID []byte
 	err := a.db.QueryRowContext(ctx, `SELECT id FROM ofertas WHERE id_computrabajo = ?`, idComputrabajo).Scan(&ofertaID)
 	if err == sql.ErrNoRows {
@@ -56,7 +70,7 @@ func (a *Almacen) CandidatosDeOferta(ctx context.Context, idComputrabajo string)
 	if err != nil {
 		return nil, err
 	}
-	return a.candidatosDe(ctx, ofertaID, true)
+	return a.candidatosDe(ctx, ofertaID, true, conTexto)
 }
 
 // CandidatosPrevios devuelve los candidatos ya analizados de la vacante (también los que dejaron
@@ -66,7 +80,7 @@ func (a *Almacen) CandidatosPrevios(ctx context.Context, oferta modelos.OfertaLa
 	if err != nil {
 		return nil, err
 	}
-	lista, err := a.candidatosDe(ctx, ofertaID, false)
+	lista, err := a.candidatosDe(ctx, ofertaID, false, true)
 	if err != nil {
 		return nil, err
 	}
@@ -121,31 +135,31 @@ type filaCandidato struct {
 	dictamen, etapa                                   string
 	errorProceso, nombre, genero                      sql.NullString
 	urlDetalle, urlCV, urlFoto                        sql.NullString
-	indice                                            sql.NullInt64
+	indice, edadFicha                                 sql.NullInt64
 	evEsApto, cumpleGenero, cumpleEPS                 sql.NullBool
 	cumpleRunt, cumpleSimit, descarte, verifPendiente sql.NullBool
 	evGenero, detalleEPS, detalleRunt, detalleSimit   sql.NullString
 }
 
 // candidatosDe reconstruye a los candidatos de una vacante.
-func (a *Almacen) candidatosDe(ctx context.Context, ofertaID []byte, soloVigentes bool) ([]modelos.Candidato, error) {
+func (a *Almacen) candidatosDe(ctx context.Context, ofertaID []byte, soloVigentes, conTexto bool) ([]modelos.Candidato, error) {
 	cond := "po.oferta_id = ?"
 	if soloVigentes {
 		cond += " AND po.activa = 1"
 	}
-	return a.candidatosDonde(ctx, cond, ofertaID)
+	return a.candidatosDonde(ctx, conTexto, cond, ofertaID)
 }
 
 // candidatosDonde reconstruye a los candidatos de las postulaciones que cumplen cond (una
 // condición sobre el alias po de postulaciones) con cuatro consultas, sin importar cuántos sean:
 // postulaciones con su perfil y evaluación vigente, motivos de descarte, la última validación de
-// cada fuente y los archivos.
-func (a *Almacen) candidatosDonde(ctx context.Context, cond string, args ...any) ([]modelos.Candidato, error) {
+// cada fuente y los archivos. conTexto=false no lee del disco el texto de los perfiles.
+func (a *Almacen) candidatosDonde(ctx context.Context, conTexto bool, cond string, args ...any) ([]modelos.Candidato, error) {
 	filas, err := a.db.QueryContext(ctx,
 		`SELECT po.id, po.dictamen, po.etapa_actual, po.error_proceso, pe.cedula_cifrada,
 		        (SELECT dd.fecha_nacimiento_cifrada FROM datos_declarados dd
 		          WHERE dd.postulacion_id = po.id ORDER BY dd.id DESC LIMIT 1),
-		        pf.indice, pf.nombre, pf.genero_inferido, pf.url_detalle, pf.url_cv, pf.url_foto,
+		        pf.indice, pf.edad, pf.nombre, pf.genero_inferido, pf.url_detalle, pf.url_cv, pf.url_foto,
 		        ev.id, ev.es_apto, ev.genero, ev.cumple_genero, ev.cumple_eps, ev.cumple_runt, ev.cumple_simit,
 		        ev.detalle_eps, ev.detalle_runt, ev.detalle_simit, ev.descarte_temprano, ev.verificacion_pendiente
 		   FROM postulaciones po
@@ -165,7 +179,7 @@ func (a *Almacen) candidatosDonde(ctx context.Context, cond string, args ...any)
 	for filas.Next() {
 		var f filaCandidato
 		if err := filas.Scan(&f.postulacion, &f.dictamen, &f.etapa, &f.errorProceso, &f.cedulaCifrada, &f.nacimientoCifrado,
-			&f.indice, &f.nombre, &f.genero, &f.urlDetalle, &f.urlCV, &f.urlFoto,
+			&f.indice, &f.edadFicha, &f.nombre, &f.genero, &f.urlDetalle, &f.urlCV, &f.urlFoto,
 			&f.evaluacionID, &f.evEsApto, &f.evGenero, &f.cumpleGenero, &f.cumpleEPS, &f.cumpleRunt, &f.cumpleSimit,
 			&f.detalleEPS, &f.detalleRunt, &f.detalleSimit, &f.descarte, &f.verifPendiente); err != nil {
 			return nil, err
@@ -263,7 +277,7 @@ func (a *Almacen) candidatosDonde(ctx context.Context, cond string, args ...any)
 		if err := archivos.Scan(&postulacion, &tipo, &etapa, &ruta); err != nil {
 			return nil, err
 		}
-		if i, ok := indice[string(postulacion)]; ok {
+		if i, ok := indice[string(postulacion)]; ok && (conTexto || tipo != "texto_perfil") {
 			a.asignarArchivo(&candidatos[i], tipo, etapa.String, ruta)
 		}
 	}
@@ -295,6 +309,9 @@ func (a *Almacen) armarCandidato(f filaCandidato) (modelos.Candidato, error) {
 	// Solo los estados de pausa llegan al candidato; "completado", "pendiente"... son del flujo normal.
 	if modelos.EnPausa(f.etapa) {
 		c.EstadoProceso = f.etapa
+	}
+	if f.edadFicha.Valid && f.edadFicha.Int64 > 0 {
+		c.Edad = int(f.edadFicha.Int64) // la de la ficha; si hay fecha de nacimiento, la de abajo manda
 	}
 	if len(f.nacimientoCifrado) > 0 {
 		if texto, err := a.claves.Descifrar(f.nacimientoCifrado); err == nil {

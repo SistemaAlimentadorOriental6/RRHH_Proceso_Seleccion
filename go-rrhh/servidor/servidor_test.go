@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"go-rrhh/configuracion"
 	"go-rrhh/modelos"
@@ -300,12 +301,21 @@ func TestVacantesComputrabajoEnVivo(t *testing.T) {
 	ctrl.numCuentas = 1
 	h := (&ServidorWeb{controlador: ctrl}).rutas()
 
+	// La primera vez se lee en vivo sin conteos (rápido) y los conteos llegan en segundo plano.
 	rr := pedir(h, "GET", "/api/computrabajo/vacantes", nil)
-	if rr.Code != 200 {
-		t.Fatalf("código %d: %s", rr.Code, rr.Body.String())
+	if rr.Code != 200 || rr.Header().Get("X-Vacantes-Fuente") != "en-vivo-actualizando" {
+		t.Fatalf("código %d, fuente %q: %s", rr.Code, rr.Header().Get("X-Vacantes-Fuente"), rr.Body.String())
 	}
+	if strings.Contains(rr.Body.String(), `"total_candidatos":37`) {
+		t.Error("la primera respuesta no debe esperar los conteos")
+	}
+	ctrl.refrescos.Wait()
 	if falsa.auths != 1 {
 		t.Errorf("debía autenticar una vez tras la sesión expirada, auths=%d", falsa.auths)
+	}
+	rr = pedir(h, "GET", "/api/computrabajo/vacantes", nil)
+	if rr.Header().Get("X-Vacantes-Fuente") != "cache-reciente" {
+		t.Errorf("tras el refresco debía servirse la lista guardada: %q", rr.Header().Get("X-Vacantes-Fuente"))
 	}
 
 	var vacantes []VacanteComputrabajo
@@ -321,6 +331,13 @@ func TestVacantesComputrabajoEnVivo(t *testing.T) {
 	}
 	if b.Procesada || !b.Excluida {
 		t.Errorf("la segunda debe estar excluida y sin procesar: %+v", b)
+	}
+	// Los totales de lo analizado vienen en la lista: la pantalla no carga a los candidatos para contarlos.
+	if a.Resumen == nil || a.Resumen.Postulados == 0 || a.Resumen.Aptos+a.Resumen.NoAptos+a.Resumen.Pendientes != a.Resumen.Postulados {
+		t.Errorf("resumen de lo analizado: %+v", a.Resumen)
+	}
+	if b.Resumen != nil {
+		t.Errorf("sin análisis no hay resumen: %+v", b.Resumen)
 	}
 	// Un fallo al contar una vacante no tumba la respuesta: queda null con su aviso.
 	if b.TotalCandidatos != nil || b.ErrorConteo == "" {
@@ -443,12 +460,63 @@ func TestVacantesReutilizaListaReciente(t *testing.T) {
 	if rr.Header().Get("X-Vacantes-Fuente") != "cache-reciente" || falsa.listados != listados {
 		t.Errorf("la lista reciente debía reutilizarse (fuente %q, lecturas %d→%d)", rr.Header().Get("X-Vacantes-Fuente"), listados, falsa.listados)
 	}
-	if rr := pedir(h, "GET", "/api/computrabajo/vacantes", nil); rr.Header().Get("X-Vacantes-Fuente") == "cache-reciente" {
-		t.Error("sin conteos en la lista guardada hay que leer de nuevo")
+	// Sin conteos guardados, pedirlos sirve la lista igual y los lee en segundo plano.
+	if rr := pedir(h, "GET", "/api/computrabajo/vacantes", nil); rr.Header().Get("X-Vacantes-Fuente") != "cache-actualizando" {
+		t.Errorf("sin conteos en la lista guardada debía actualizarse en segundo plano: %q", rr.Header().Get("X-Vacantes-Fuente"))
 	}
+	ctrl.refrescos.Wait()
 	if rr := pedir(h, "GET", "/api/computrabajo/vacantes", nil); rr.Header().Get("X-Vacantes-Fuente") != "cache-reciente" {
 		t.Error("con conteos guardados y recientes se reutiliza")
 	}
+	ctrl.Detener()
+}
+
+// Una lista vieja se responde al instante aunque el navegador esté ocupado (antes la petición esperaba
+// a que terminara, p. ej., el conteo del proceso automático), y se actualiza en segundo plano.
+func TestVacantesNoEsperanAlNavegador(t *testing.T) {
+	cfg, _ := montarDescargas(t)
+	cfg.UsuarioComputrabajo, cfg.ClaveComputrabajo = "u", "p"
+	falsa := &ofertasFalsas{}
+	ctrl := NuevoControladorRRHH(cfg, NuevoRepositorioDisco(cfg.DirectorioDescargas), "")
+	ctrl.fabricaOfertas = func(int) FuenteOfertas { return falsa }
+	ctrl.numCuentas = 1
+	h := (&ServidorWeb{controlador: ctrl}).rutas()
+
+	ctrl.guardarOfertasEnCache([]ofertaConConteo{{OfertaLaboral: modelos.OfertaLaboral{Titulo: "Operador vieja", ID: "VIEJA0000001", Cuenta: 1}}})
+	ctrl.muCache.Lock()
+	ctrl.cacheOfertasEn = time.Now().Add(-time.Hour)
+	ctrl.muCache.Unlock()
+
+	ctrl.semCT <- struct{}{} // otro tiene el navegador
+	listo := make(chan *httptest.ResponseRecorder, 1)
+	go func() { listo <- pedir(h, "GET", "/api/computrabajo/vacantes", nil) }()
+	select {
+	case rr := <-listo:
+		if rr.Header().Get("X-Vacantes-Fuente") != "cache-actualizando" || !strings.Contains(rr.Body.String(), "VIEJA0000001") {
+			t.Errorf("fuente %q: %s", rr.Header().Get("X-Vacantes-Fuente"), rr.Body.String())
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("la lista esperó al navegador")
+	}
+	if ctrl.refrescarVacantes() {
+		t.Error("solo debe haber un refresco a la vez")
+	}
+	<-ctrl.semCT // se libera el navegador: el refresco sigue
+	ctrl.refrescos.Wait()
+	if lista, _ := ctrl.ofertasEnCache(); !tieneConteos(lista) {
+		t.Errorf("el refresco debía dejar la lista con conteos: %+v", lista)
+	}
+
+	// La lista sobrevive a un reinicio, con la cuenta de cada vacante.
+	otro := NuevoControladorRRHH(cfg, NuevoRepositorioDisco(cfg.DirectorioDescargas), "")
+	if lista, en := otro.ofertasEnCache(); len(lista) != 2 || en.IsZero() {
+		t.Errorf("lista recuperada del disco: %+v", lista)
+	}
+	ctrl.guardarOfertasEnCache([]ofertaConConteo{{OfertaLaboral: modelos.OfertaLaboral{Titulo: "Operador", ID: "CUENTA000002", Cuenta: 1}}})
+	if lista, _ := NuevoControladorRRHH(cfg, NuevoRepositorioDisco(cfg.DirectorioDescargas), "").ofertasEnCache(); len(lista) != 1 || lista[0].Cuenta != 1 {
+		t.Errorf("la cuenta debe sobrevivir al reinicio: %+v", lista)
+	}
+	ctrl.Detener()
 }
 
 // Solo se listan (y se cuentan) las vacantes de conductor u operador: las demás no salen.
@@ -459,6 +527,7 @@ func TestVacantesSoloConductorYOperador(t *testing.T) {
 	ctrl := NuevoControladorRRHH(cfg, NuevoRepositorioDisco(cfg.DirectorioDescargas), "")
 	ctrl.fabricaOfertas = func(int) FuenteOfertas { return &ofertasFalsas{} }
 	ctrl.numCuentas = 1
+	t.Cleanup(ctrl.Detener) // espera el refresco de conteos en segundo plano
 	h := (&ServidorWeb{controlador: ctrl}).rutas()
 
 	var vacantes []VacanteComputrabajo
@@ -468,5 +537,67 @@ func TestVacantesSoloConductorYOperador(t *testing.T) {
 	}
 	if !cfg.OfertaIncluida("Conductor(a) de buses alimentadores") || cfg.OfertaIncluida("Analista de desarrollo organizacional") {
 		t.Error("el filtro por título no funciona")
+	}
+}
+
+// Con el frontend compilado, el servidor entrega la aplicación (y sus rutas) sin tapar la API.
+func TestServidorEntregaElFrontendCompilado(t *testing.T) {
+	cfg, _ := montarDescargas(t)
+	dist := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dist, "assets"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.WriteFile(filepath.Join(dist, "index.html"), []byte("<html>app</html>"), 0o644)
+	_ = os.WriteFile(filepath.Join(dist, "assets", "app-123.js"), []byte("console.log(1)"), 0o644)
+	ctrl := NuevoControladorRRHH(cfg, NuevoRepositorioDisco(cfg.DirectorioDescargas), "")
+	h := (&ServidorWeb{controlador: ctrl, frontend: dist}).rutas()
+
+	for _, ruta := range []string{"/", "/vacantes/abc/candidatos/x"} {
+		if rr := pedir(h, "GET", ruta, nil); rr.Code != 200 || !strings.Contains(rr.Body.String(), "app") {
+			t.Errorf("%s: %d %s", ruta, rr.Code, rr.Body.String())
+		}
+	}
+	rr := pedir(h, "GET", "/assets/app-123.js", nil)
+	if rr.Code != 200 || !strings.Contains(rr.Header().Get("Cache-Control"), "immutable") {
+		t.Errorf("asset: %d %v", rr.Code, rr.Header())
+	}
+	if rr := pedir(h, "GET", "/api/no-existe", nil); rr.Code != 404 || !strings.Contains(rr.Header().Get("Content-Type"), "json") {
+		t.Errorf("api desconocida: %d", rr.Code)
+	}
+	if rr := pedir(h, "GET", "/api/salud", nil); rr.Code != 200 {
+		t.Errorf("la API sigue respondiendo: %d", rr.Code)
+	}
+	_ = os.WriteFile(filepath.Join(filepath.Dir(dist), "secreto.txt"), []byte("CLAVE-PRIVADA"), 0o644)
+	for _, ruta := range []string{"/../secreto.txt", "/assets/../../secreto.txt", "/%2e%2e/secreto.txt"} {
+		if rr := pedir(h, "GET", ruta, nil); strings.Contains(rr.Body.String(), "CLAVE-PRIVADA") {
+			t.Errorf("%s: no debe salir de la carpeta del frontend", ruta)
+		}
+	}
+}
+
+// Cada conteo de inscritos llega a la lista guardada en cuanto se lee, sin esperar a las demás vacantes.
+func TestConteoParcialSeAnotaEnLaLista(t *testing.T) {
+	cfg, _ := montarDescargas(t)
+	ctrl := NuevoControladorRRHH(cfg, NuevoRepositorioDisco(cfg.DirectorioDescargas), "")
+	ctrl.guardarOfertasEnCache([]ofertaConConteo{
+		{OfertaLaboral: modelos.OfertaLaboral{ID: "AAA111", Titulo: "Operador"}},
+		{OfertaLaboral: modelos.OfertaLaboral{ID: "BBB222", Titulo: "Conductor"}},
+	})
+	antes, _ := ctrl.ofertasEnCache()
+	avisos, desuscribir := ctrl.cambios.suscribir()
+	defer desuscribir()
+
+	ctrl.anotarConteo("aaa111", 12)
+	ctrl.anotarConteo("BBB222", 5) // dentro del intervalo: se anota pero no se vuelve a avisar
+
+	lista, _ := ctrl.ofertasEnCache()
+	if lista[0].Total == nil || *lista[0].Total != 12 || lista[1].Total == nil || *lista[1].Total != 5 {
+		t.Errorf("conteos anotados: %+v", lista)
+	}
+	if antes[0].Total != nil {
+		t.Error("la lista que ya se había leído no debe cambiar por debajo")
+	}
+	if n := len(avisos); n != 1 {
+		t.Errorf("avisos de conteo parcial = %d; quería 1", n)
 	}
 }

@@ -29,6 +29,9 @@ func (p *persistenciaFalsa) GuardarCandidato(ctx context.Context, o modelos.Ofer
 	defer p.mu.Unlock()
 	p.guardados = append(p.guardados, *c)
 	p.ofertas = append(p.ofertas, o)
+	if p.err == nil {
+		c.PostulacionID = "post-" + c.Nombre // como la base: al guardar, el candidato recibe su id
+	}
 	return p.err
 }
 
@@ -133,5 +136,36 @@ func TestFalloDeLaBaseNoDetieneElAnalisis(t *testing.T) {
 	}
 	if avisos != 3 {
 		t.Errorf("avisos de error al guardar = %d; quería 3 (uno por candidato)", avisos)
+	}
+}
+
+// El resultado sale antes de guardar (la pantalla no espera a la base) y el id de la postulación llega
+// después, en candidato.guardado.
+func TestResultadoSaleAntesDeGuardar(t *testing.T) {
+	eventos := analizarConPersistencia(t, &persistenciaFalsa{})
+	completoEn, guardadoEn := map[string]int{}, map[string]int{}
+	for i, ev := range eventos {
+		var cuerpo struct {
+			Nombre        string `json:"nombre"`
+			PostulacionID string `json:"postulacion_id"`
+		}
+		_ = json.Unmarshal([]byte(ev.datos), &cuerpo)
+		switch ev.tipo {
+		case "candidato.completo":
+			completoEn[cuerpo.Nombre] = i
+		case "candidato.guardado":
+			guardadoEn[cuerpo.Nombre] = i
+			if cuerpo.PostulacionID != "post-"+cuerpo.Nombre {
+				t.Errorf("id de postulación de %s: %q", cuerpo.Nombre, cuerpo.PostulacionID)
+			}
+		}
+	}
+	if len(guardadoEn) != 3 {
+		t.Fatalf("avisos de guardado: %v", guardadoEn)
+	}
+	for nombre, g := range guardadoEn {
+		if c, ok := completoEn[nombre]; !ok || c > g {
+			t.Errorf("%s: el resultado (%d) debe salir antes del guardado (%d)", nombre, c, g)
+		}
 	}
 }
