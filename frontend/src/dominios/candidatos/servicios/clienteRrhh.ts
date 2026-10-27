@@ -25,7 +25,7 @@ async function pedirJson<T>(ruta: string, init?: RequestInit): Promise<T> {
 async function pedirJsonConCabeceras<T>(ruta: string, init?: RequestInit): Promise<{ datos: T; cabeceras: Headers }> {
   let respuesta: Response;
   try {
-    respuesta = await fetch(`${BASE_API}${ruta}`, init);
+    respuesta = await fetch(`${BASE_API}${ruta}`, { credentials: 'include', ...init });
   } catch (error) {
     if (error instanceof DOMException && error.name === 'AbortError') throw error;
     throw new ErrorApi('No hay conexión con el servidor RRHH (¿está corriendo en el puerto 8080?)', 0);
