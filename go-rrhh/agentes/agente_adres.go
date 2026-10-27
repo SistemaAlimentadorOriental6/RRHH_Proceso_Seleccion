@@ -199,9 +199,12 @@ func (a *AgenteAdres) consultarUnaVez(ctx context.Context, cedulaLimpia string, 
 	// Obtener lista de targets antes del clic para detectar la nueva pestaña
 	var targetsPre []*target.Info
 	err = chromedp.Run(taskCtx,
-		chromedp.WaitVisible("#tipoDoc", chromedp.ByID),
-		chromedp.SetValue("#tipoDoc", "CC", chromedp.ByID),
-		chromedp.SetValue("#txtNumDoc", cedulaLimpia, chromedp.ByID),
+		// Por JS y no por nodos de chromedp: el portal re-renderiza el DOM y los ids de nodo caducan
+		// ("No node with given id found").
+		chromedp.Evaluate(fmt.Sprintf(`(() => {
+			document.getElementById('tipoDoc').value = 'CC';
+			document.getElementById('txtNumDoc').value = %q;
+		})()`, cedulaLimpia), nil),
 		chromedp.Sleep(500*time.Millisecond),
 		chromedp.ActionFunc(func(c context.Context) error {
 			infos, err := target.GetTargets().Do(c)
@@ -210,7 +213,7 @@ func (a *AgenteAdres) consultarUnaVez(ctx context.Context, cedulaLimpia string, 
 			}
 			return nil
 		}),
-		chromedp.Click("#btnConsultar", chromedp.ByID),
+		chromedp.Evaluate(`document.getElementById('btnConsultar').click()`, nil),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("error al interactuar con formulario ADRES: %w", err)
