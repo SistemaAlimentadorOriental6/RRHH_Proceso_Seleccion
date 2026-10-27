@@ -190,11 +190,8 @@ func (a *AgenteAdres) consultarUnaVez(ctx context.Context, cedulaLimpia string, 
 
 	// Obtener lista de targets antes del clic para detectar la nueva pestaña
 	var targetsPre []*target.Info
+	var formularioEnviado bool
 	err = chromedp.Run(taskCtx,
-		chromedp.WaitVisible("#tipoDoc", chromedp.ByID),
-		chromedp.SetValue("#tipoDoc", "CC", chromedp.ByID),
-		chromedp.SetValue("#txtNumDoc", cedulaLimpia, chromedp.ByID),
-		chromedp.Sleep(500*time.Millisecond),
 		chromedp.ActionFunc(func(c context.Context) error {
 			infos, err := target.GetTargets().Do(c)
 			if err == nil {
@@ -202,9 +199,21 @@ func (a *AgenteAdres) consultarUnaVez(ctx context.Context, cedulaLimpia string, 
 			}
 			return nil
 		}),
-		chromedp.Click("#btnConsultar", chromedp.ByID),
+		chromedp.Evaluate(fmt.Sprintf(`(() => {
+			const sel = document.getElementById('tipoDoc');
+			const inp = document.getElementById('txtNumDoc');
+			const btn = document.getElementById('btnConsultar');
+			if (!sel || !inp || !btn) return false;
+			sel.value = 'CC';
+			sel.dispatchEvent(new Event('change', { bubbles: true }));
+			inp.value = %s;
+			inp.dispatchEvent(new Event('input', { bubbles: true }));
+			inp.dispatchEvent(new Event('change', { bubbles: true }));
+			btn.click();
+			return true;
+		})()`, literalJS(cedulaLimpia)), &formularioEnviado),
 	)
-	if err != nil {
+	if err != nil || !formularioEnviado {
 		return nil, fmt.Errorf("error al interactuar con formulario ADRES: %w", err)
 	}
 
