@@ -33,6 +33,7 @@ func opcionesChrome(headless bool, extra ...chromedp.ExecAllocatorOption) []chro
 	opts = append(opts, chromedp.DefaultExecAllocatorOptions[:]...)
 	opts = append(opts,
 		chromedp.Flag("headless", headless),
+		chromedp.Flag("ignore-certificate-errors", true),
 		chromedp.Flag("disable-gpu", true),
 		chromedp.Flag("no-sandbox", true),
 		chromedp.Flag("disable-dev-shm-usage", true),

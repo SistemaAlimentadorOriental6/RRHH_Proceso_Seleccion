@@ -36,7 +36,7 @@ func main() {
 
 	// Servidor HTTP (solo API REST)
 	modoWeb := flag.Bool("web", false, "Inicia el servidor de la API REST (vacantes, candidatos, ranking con IA)")
-	puertoWeb := flag.Int("puerto", 8080, "Puerto TCP de la API (predeterminado: 8080)")
+	puertoWeb := flag.Int("puerto", 3002, "Puerto TCP de la API (predeterminado: 3002)")
 
 	// Buzón de correo con hojas de vida (IMAP)
 	leerCorreo := flag.Bool("correo", false, "Lee el buzón de hojas de vida (CORREO_* del .env) y guarda las halladas en descargas/correo/")
