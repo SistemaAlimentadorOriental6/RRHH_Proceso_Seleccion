@@ -452,7 +452,7 @@ export class SesionAnalisis {
         this.conservados.set(c.nombre, [...(this.conservados.get(c.nombre) ?? []), c]);
       }
     }
-    const origen = new EventSource(url);
+    const origen = new EventSource(url, { withCredentials: true });
     this.origen = origen;
     // Hasta el evento repeticion.fin el servidor repite lo ya ocurrido; si no llega (servidor viejo), se
     // da por terminada la repetición a los pocos segundos.
@@ -982,7 +982,7 @@ class AlmacenRrhh {
   }
 
   private conectarCambios(): void {
-    const origen = new EventSource(urlCambios());
+    const origen = new EventSource(urlCambios(), { withCredentials: true });
     this.cambios = origen;
     const refrescar = () => {
       this.versionCambios++;
