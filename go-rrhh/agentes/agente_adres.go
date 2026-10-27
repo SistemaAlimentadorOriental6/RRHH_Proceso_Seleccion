@@ -25,9 +25,9 @@ type AgenteAdres struct {
 
 // NuevoAgenteAdres inicializa el agente de validación de EPS.
 func NuevoAgenteAdres(cfg *configuracion.Configuracion) *AgenteAdres {
-	// Headless nuevo (--headless=new) ejecuta el navegador real completo sin requerir servidor X11 en Linux
+	// Chrome VISIBLE para ADRES: reCAPTCHA Enterprise invisible requiere browser real
 	opts := opcionesChrome(false,
-		chromedp.Flag("headless", "new"),
+		chromedp.Flag("window-position", "-2000,-2000"),
 		chromedp.Flag("window-size", "800,600"),
 		chromedp.UserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"),
 	)
