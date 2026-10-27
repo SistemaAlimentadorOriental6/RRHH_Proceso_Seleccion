@@ -32,6 +32,8 @@ func NuevoSolucionador(rutaSolver string) *SolucionadorCaptcha {
 		candidatas := []string{
 			filepath.Join("..", "bin", "solve.exe"),
 			filepath.Join(".", "bin", "solve.exe"),
+			filepath.Join("..", "bin", "solve-linux"), // Linux
+			filepath.Join(".", "bin", "solve-linux"),
 			`C:\Users\daniel.ochoa\Proyectos\PruebaRRHH\bin\solve.exe`,
 			`C:\Users\daniel.ochoa\Proyectos\RuntAutomatizado\solve.exe`,
 		}
