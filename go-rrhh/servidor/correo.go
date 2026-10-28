@@ -72,10 +72,10 @@ func (c *ControladorRRHH) vacanteCorreo() *ofertaConConteo {
 
 // IniciarAutomatico arranca en segundo plano el recorrido completo, sin intervención:
 //  1. cada vacante activa de Computrabajo (todas las cuentas), una tras otra;
-//  2. después las hojas de vida del correo, con el mismo flujo;
-//  3. y de ahí en adelante, cada RRHH_CORREO_CADA_MIN minutos (1 por defecto), revisa el buzón y los
-//     inscritos de cada vacante de Computrabajo: solo si llegó algo nuevo lo analiza (lo ya analizado
-//     queda como está).
+//  2. en paralelo desde el inicio, el buzón: se lee cada RRHH_CORREO_CADA_MIN minutos (1 por defecto)
+//     y sus hojas de vida se analizan con el mismo flujo cuando llega alguna;
+//  3. y de ahí en adelante, con la misma frecuencia, revisa los inscritos de cada vacante de
+//     Computrabajo: solo si llegó algo nuevo lo analiza (lo ya analizado queda como está).
 //
 // RRHH_AUTOMATICO=false lo apaga (se puede lanzar cada análisis a mano desde la pantalla).
 func (c *ControladorRRHH) IniciarAutomatico() {
@@ -97,6 +97,15 @@ func (c *ControladorRRHH) cicloAutomatico() {
 		}
 	}()
 	log.Printf("[auto] Proceso automático iniciado: primero Computrabajo, después el correo")
+
+	cada := time.Duration(enteroEnv("RRHH_CORREO_CADA_MIN", int(cadaCorreoPorDefecto/time.Minute))) * time.Minute
+	if cada <= 0 {
+		cada = cadaCorreoPorDefecto
+	}
+	// El buzón se vigila desde ya, en paralelo: no espera a que termine el recorrido inicial de Computrabajo.
+	if c.cfg.CorreoActivo() {
+		go c.vigilarBuzon(ctx, cada)
+	}
 
 	vistos := map[string]int{} // inscritos de cada vacante la última vez que se miró
 	if c.cfg.ValidarCredenciales() {
@@ -149,33 +158,69 @@ func (c *ControladorRRHH) cicloAutomatico() {
 		}
 	}
 
-	cada := time.Duration(enteroEnv("RRHH_CORREO_CADA_MIN", int(cadaCorreoPorDefecto/time.Minute))) * time.Minute
-	if cada <= 0 {
-		cada = cadaCorreoPorDefecto
-	}
 	log.Printf("[auto] Revisión de novedades (correo y Computrabajo) cada %s", cada)
 	reintentoCada := time.Duration(enteroEnv("RRHH_REINTENTO_PENDIENTES_MIN", int(reintentoPendientesPorDefecto/time.Minute))) * time.Minute
 	if reintentoCada <= 0 {
 		reintentoCada = reintentoPendientesPorDefecto
 	}
 	ultimoReintento := time.Now()
-	if c.cfg.CorreoActivo() {
-		c.analizarYEsperar(ctx, ofertaCorreo())
-	}
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-time.After(cada):
 		}
-		// La pantalla muestra al asistente despierto mientras dura la revisión y dormido el resto del minuto.
-		c.cambios.emitir("revision", map[string]string{"estado": "inicio"})
-		c.revisarNovedades(ctx, vistos)
-		if time.Since(ultimoReintento) >= reintentoCada {
-			ultimoReintento = time.Now()
-			c.reintentarPendientes(ctx)
+		// Un fallo inesperado en una vuelta no debe matar la vigilancia para siempre.
+		protegido("revisión de novedades", func() {
+			// La pantalla muestra al asistente despierto mientras dura la revisión y dormido el resto del minuto.
+			c.cambios.emitir("revision", map[string]string{"estado": "inicio"})
+			defer c.cambios.emitir("revision", map[string]string{"estado": "fin"})
+			if c.cfg.ValidarCredenciales() {
+				c.revisarNovedadesComputrabajo(ctx, vistos)
+			}
+			if time.Since(ultimoReintento) >= reintentoCada {
+				ultimoReintento = time.Now()
+				c.reintentarPendientes(ctx)
+			}
+		})
+	}
+}
+
+// protegido ejecuta una vuelta de un ciclo de fondo registrando el pánico en vez de tumbar el ciclo.
+func protegido(nombre string, f func()) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("[PANIC] %s: %v", nombre, r)
 		}
-		c.cambios.emitir("revision", map[string]string{"estado": "fin"})
+	}()
+	f()
+}
+
+// vigilarBuzon lee el buzón cada intervalo sin depender de que haya un análisis en curso (antes la
+// lectura esperaba a que terminara el análisis de Computrabajo, que puede tardar horas). Si llegaron
+// hojas de vida las analiza cuando le toque el turno; si ese análisis falla, lo reintenta en la
+// siguiente vuelta.
+func (c *ControladorRRHH) vigilarBuzon(ctx context.Context, cada time.Duration) {
+	porAnalizar := true // al arrancar se analiza lo que ya estuviera guardado sin analizar
+	for {
+		protegido("vigilancia del buzón", func() {
+			_, guardadas, err := c.agenteCorreo().ProcesarNuevos(ctx)
+			if err != nil && ctx.Err() == nil {
+				log.Printf("[auto] Buzón: %v", err)
+			}
+			if guardadas > 0 {
+				log.Printf("[auto] Buzón: %d hojas de vida nuevas; se analizan", guardadas)
+				porAnalizar = true
+			}
+			if porAnalizar && ctx.Err() == nil {
+				porAnalizar = !c.analizarYEsperar(ctx, ofertaCorreo())
+			}
+		})
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(cada):
+		}
 	}
 }
 
@@ -215,24 +260,6 @@ func (c *ControladorRRHH) reintentarPendientes(ctx context.Context) {
 		}
 		log.Printf("[auto] Vacante %q: hay candidatos pendientes por una consulta fallida; se reintentan", o.Titulo)
 		c.analizarYEsperar(ctx, o.OfertaLaboral)
-	}
-}
-
-// revisarNovedades mira el buzón y las vacantes de Computrabajo una vez, y analiza solo lo que llegó.
-func (c *ControladorRRHH) revisarNovedades(ctx context.Context, vistos map[string]int) {
-	if c.cfg.CorreoActivo() {
-		// Solo se abre un análisis (navegadores, consultas) si de verdad llegó algo.
-		revisados, guardadas, err := c.agenteCorreo().ProcesarNuevos(ctx)
-		switch {
-		case err != nil && ctx.Err() == nil:
-			log.Printf("[auto] Buzón: %v", err)
-		case guardadas > 0:
-			log.Printf("[auto] Buzón: %d correos nuevos, %d hojas de vida; se analizan", revisados, guardadas)
-			c.analizarYEsperar(ctx, ofertaCorreo())
-		}
-	}
-	if c.cfg.ValidarCredenciales() {
-		c.revisarNovedadesComputrabajo(ctx, vistos)
 	}
 }
 

@@ -94,6 +94,16 @@ func entero(nombre string, porDefecto, min, max int) int {
 	return n
 }
 
+// urlPlataforma devuelve la base de los enlaces enviados a candidatos según RRHH_ENTORNO
+// ("produccion" o "desarrollo", por defecto desarrollo).
+func urlPlataforma() string {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("RRHH_ENTORNO"))) {
+	case "produccion", "producción", "prod":
+		return "https://proceso-seleccion.sao6.com.co"
+	}
+	return "http://localhost:5173"
+}
+
 // booleano lee una variable de entorno verdadero/falso; si falta usa porDefecto.
 func booleano(nombre string, porDefecto bool) bool {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv(nombre))) {
@@ -157,7 +167,7 @@ func Cargar() (*Configuracion, error) {
 		SMTPUsuario:             strings.TrimSpace(os.Getenv("SMTP_USUARIO")),
 		SMTPClave:               os.Getenv("SMTP_CLAVE"),
 		SMTPRemitente:           strings.TrimSpace(os.Getenv("SMTP_REMITENTE")),
-		URLPlataformaValidacion: strings.TrimSpace(os.Getenv("URL_PLATAFORMA_VALIDACION")),
+		URLPlataformaValidacion: urlPlataforma(),
 		WhatsAppURL:             strings.TrimSpace(os.Getenv("WHATSAPP_API_URL")),
 		WhatsAppToken:           strings.TrimSpace(os.Getenv("ACCESS_TOKEN_WHATSAPP")),
 		WhatsAppPlantilla: func() string {
