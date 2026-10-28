@@ -34,12 +34,18 @@ except Exception as e:
     sys.exit(1)
 `
 
-	cmd := exec.CommandContext(ctx, "python", "-c", cmdPython, rutaPDF)
-	var out bytes.Buffer
-	cmd.Stdout = &out
-
-	if err := cmd.Run(); err == nil && out.Len() > 50 {
-		return limpiarTexto(out.String()), nil
+	// En Linux suele existir solo «python3»; sin él la lectura caía al respaldo, que de un PDF comprimido
+	// saca casi nada.
+	for _, python := range []string{"python3", "python"} {
+		if _, err := exec.LookPath(python); err != nil {
+			continue
+		}
+		cmd := exec.CommandContext(ctx, python, "-c", cmdPython, rutaPDF)
+		var out bytes.Buffer
+		cmd.Stdout = &out
+		if err := cmd.Run(); err == nil && out.Len() > 50 {
+			return limpiarTexto(out.String()), nil
+		}
 	}
 
 	// 2. Fallback de lectura directa de streams de texto
@@ -131,6 +137,10 @@ type SintesisTecnica struct {
 	TieneMecanica        bool
 	EmpresasClave        []string
 	ExtractoLaboral      string
+	// Trabajos son los bloques «Empresa / Cargo / Tiempo laborado» del CV; ExperienciaConduccion, si algún
+	// cargo es de conductor, chofer u operador (sin saber aún de qué vehículo: eso lo decide la IA).
+	Trabajos              []TrabajoCV
+	ExperienciaConduccion bool
 }
 
 // AnalizarExperienciaCV extrae de forma determinista y ultrarrápida evidencias laborales del CV.
@@ -167,6 +177,14 @@ func AnalizarExperienciaCV(textoCV string) SintesisTecnica {
 	for _, emp := range empresasReferencia {
 		if strings.Contains(textoMin, strings.ToLower(emp)) {
 			s.EmpresasClave = append(s.EmpresasClave, emp)
+		}
+	}
+
+	s.Trabajos = TrabajosDeCV(textoCV)
+	for _, t := range s.Trabajos {
+		if EsCargoDeConduccion(t.Cargo) {
+			s.ExperienciaConduccion = true
+			break
 		}
 	}
 

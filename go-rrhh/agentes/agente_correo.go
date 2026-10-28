@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -205,11 +206,16 @@ func (a *AgenteCorreo) ProcesarNuevos(ctx context.Context) (revisados, guardados
 			if !ok || conocidos[h.MessageID] || (h.HuellaAdjuntos != "" && conocidos["huella:"+h.HuellaAdjuntos]) {
 				continue
 			}
-			previas = append(previas, h)
 			conocidos[h.MessageID] = true
 			if h.HuellaAdjuntos != "" {
 				conocidos["huella:"+h.HuellaAdjuntos] = true
 			}
+			// La misma persona que escribe otra vez (CV corregido, otro archivo) se consolida en su hoja.
+			if i := slices.IndexFunc(previas, func(p modelos.HojaVidaCorreo) bool { return mismaPersona(p, h) }); i >= 0 {
+				fusionarHoja(&previas[i], h)
+				continue
+			}
+			previas = append(previas, h)
 			guardados++
 		}
 		// Se avanza el puntero solo cuando el lote quedó guardado: si algo falla se reintenta.
@@ -237,6 +243,49 @@ func (a *AgenteCorreo) ProcesarNuevos(ctx context.Context) (revisados, guardados
 		_ = utilidades.EscribirJSONAtomico(a.rutaEstado(), estado, true)
 	}
 	return revisados, guardados, ctx.Err()
+}
+
+// mismaPersona dice si dos hojas de vida son de la misma persona: misma cédula; o el mismo correo
+// propio escrito en ambas hojas de vida (no el del remitente, que en un formulario web es el del sitio);
+// o el mismo remitente con nombre parecido y sin cédulas distintas.
+func mismaPersona(a, b modelos.HojaVidaCorreo) bool {
+	if a.Cedula != "" && b.Cedula != "" {
+		return a.Cedula == b.Cedula
+	}
+	if a.Correo != "" && !strings.EqualFold(a.Correo, a.Remitente) && strings.EqualFold(a.Correo, b.Correo) && !strings.EqualFold(b.Correo, b.Remitente) {
+		return true
+	}
+	return a.Remitente != "" && a.Remitente == b.Remitente && utilidades.NombresCoinciden(a.Nombre, b.Nombre, 2)
+}
+
+// fusionarHoja suma a la hoja existente lo que trae el correo nuevo de la misma persona: sus archivos, los
+// datos que faltaban y el texto si es más completo. El identificador (MessageID) no cambia, para que el
+// candidato ya creado siga siendo el mismo.
+func fusionarHoja(destino *modelos.HojaVidaCorreo, nueva modelos.HojaVidaCorreo) {
+	for _, ruta := range nueva.Archivos {
+		if !slices.Contains(destino.Archivos, ruta) {
+			destino.Archivos = append(destino.Archivos, ruta)
+		}
+	}
+	if destino.Cedula == "" {
+		destino.Cedula = nueva.Cedula
+	}
+	if destino.Telefono == "" {
+		destino.Telefono = nueva.Telefono
+	}
+	if destino.Nombre == "" {
+		destino.Nombre = nueva.Nombre
+	}
+	if len(nueva.TextoCV) > len(destino.TextoCV) {
+		destino.TextoCV, destino.CuerpoCorreo = nueva.TextoCV, nueva.CuerpoCorreo
+		destino.TextoLeido, destino.ParecidoCV = nueva.TextoLeido, nueva.ParecidoCV
+	}
+	if destino.HuellaAdjuntos == "" {
+		destino.HuellaAdjuntos = nueva.HuellaAdjuntos
+	}
+	if destino.InteresConductor == ConductorNo && nueva.InteresConductor != ConductorNo {
+		destino.InteresConductor, destino.MotivoConductor, destino.DecididoPorIA = nueva.InteresConductor, nueva.MotivoConductor, nueva.DecididoPorIA
+	}
 }
 
 type correoCrudo struct {
@@ -281,6 +330,35 @@ type adjuntoLeido struct {
 	datos  []byte
 }
 
+func firstNonEmpty(valores ...string) string {
+	for _, v := range valores {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// extensionesPorTipo completa los adjuntos que llegan sin nombre o sin extensión.
+var extensionesPorTipo = map[string]string{
+	"application/pdf":    ".pdf",
+	"application/msword": ".doc",
+	"application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+}
+
+// nombreDeAdjunto devuelve el nombre del adjunto con extensión: si falta el nombre o la extensión, la
+// deduce del tipo del contenido (un PDF sin extensión se descartaba como si no fuera hoja de vida).
+func nombreDeAdjunto(nombre, tipo string, n int) string {
+	nombre = strings.TrimSpace(nombre)
+	if nombre == "" {
+		nombre = fmt.Sprintf("adjunto_%d", n)
+	}
+	if ext, ok := extensionesPorTipo[strings.ToLower(tipo)]; ok && !esDocumentoCV(nombre) && !esImagen(nombre) {
+		nombre += ext
+	}
+	return nombre
+}
+
 // analizarCorreo decide si el correo es una hoja de vida y, si lo es, extrae todo. El segundo valor
 // es falso cuando el correo no tiene nada que ver (publicidad, avisos del sistema, etc.).
 func (a *AgenteCorreo) analizarCorreo(ctx context.Context, m correoCrudo) (modelos.HojaVidaCorreo, bool) {
@@ -315,20 +393,28 @@ func (a *AgenteCorreo) analizarCorreo(ctx context.Context, m correoCrudo) (model
 		}
 		switch cab := parte.Header.(type) {
 		case *gomail.InlineHeader:
-			tipo, _, _ := cab.ContentType()
-			datos, _ := io.ReadAll(io.LimitReader(parte.Body, maxBytesCuerpo))
+			tipo, params, _ := cab.ContentType()
 			switch tipo {
 			case "text/plain":
+				datos, _ := io.ReadAll(io.LimitReader(parte.Body, maxBytesCuerpo))
 				textoPlano += string(datos) + "\n"
 			case "text/html":
+				datos, _ := io.ReadAll(io.LimitReader(parte.Body, maxBytesCuerpo))
 				textoHTML += string(datos) + "\n"
+			default:
+				// Muchos clientes mandan el PDF o el Word «en línea» en vez de como adjunto; antes se descartaban.
+				_, dispo, _ := cab.ContentDisposition()
+				nombre := nombreDeAdjunto(firstNonEmpty(dispo["filename"], params["name"]), tipo, len(adjuntos)+1)
+				if esDocumentoCV(nombre) {
+					datos, _ := io.ReadAll(io.LimitReader(parte.Body, maxBytesAdjunto))
+					adjuntos = append(adjuntos, adjuntoLeido{nombre: nombre, datos: datos})
+				}
 			}
 		case *gomail.AttachmentHeader:
 			nombre, _ := cab.Filename()
+			tipo, _, _ := cab.ContentType()
+			nombre = nombreDeAdjunto(nombre, tipo, len(adjuntos)+1)
 			datos, _ := io.ReadAll(io.LimitReader(parte.Body, maxBytesAdjunto))
-			if nombre == "" {
-				nombre = fmt.Sprintf("adjunto_%d", len(adjuntos)+1)
-			}
 			adjuntos = append(adjuntos, adjuntoLeido{nombre: nombre, datos: datos})
 		}
 	}
