@@ -1,6 +1,7 @@
 package agentes
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
@@ -53,6 +54,8 @@ type AgenteCorreo struct {
 	// UltimasEnPrimeraLectura: en la primera lectura (buzón sin estado) solo se guardan las N hojas de
 	// vida más recientes, revisando de los correos nuevos a los viejos. 0 = todo el buzón.
 	UltimasEnPrimeraLectura int
+	// releido: ya se volvieron a revisar los últimos correos ya leídos (solo se hace una vez por arranque).
+	releido bool
 }
 
 // NuevoAgenteCorreo guarda todo bajo descargas/correo/. ia puede ser nil.
@@ -154,6 +157,23 @@ func (a *AgenteCorreo) ProcesarNuevos(ctx context.Context) (revisados, guardados
 		}
 	}
 	sort.Slice(nuevos, func(i, j int) bool { return nuevos[i] < nuevos[j] })
+
+	// Al arrancar se vuelven a mirar los últimos correos ya leídos: los que se descartaron con reglas
+	// anteriores (o cuyo adjunto no se pudo leer) no se habrían vuelto a ver nunca, porque el puntero ya
+	// pasó de largo. Los que ya son hoja de vida se reconocen por su Message-ID y no se repiten.
+	if !a.releido && a.UltimasEnPrimeraLectura > 0 && estado.UltimoUID > 0 {
+		rangoViejo := new(imap.SeqSet)
+		rangoViejo.AddRange(1, estado.UltimoUID)
+		criterioViejo := imap.NewSearchCriteria()
+		criterioViejo.Uid = rangoViejo
+		if viejos, err := c.UidSearch(criterioViejo); err == nil {
+			sort.Slice(viejos, func(i, j int) bool { return viejos[i] < viejos[j] })
+			viejos = viejos[max(0, len(viejos)-a.UltimasEnPrimeraLectura):]
+			nuevos = append(append([]uint32(nil), viejos...), nuevos...)
+			a.releido = true
+			fmt.Printf("[*] Buzón: se vuelven a revisar los últimos %d correos ya leídos\n", len(viejos))
+		}
+	}
 	if len(nuevos) == 0 {
 		return 0, 0, nil
 	}
@@ -193,6 +213,9 @@ func (a *AgenteCorreo) ProcesarNuevos(ctx context.Context) (revisados, guardados
 		if err != nil {
 			return revisados, guardados, err
 		}
+		if len(mensajes) < len(lote) {
+			fmt.Printf("[!] Buzón: se pidieron %d correos y el servidor entregó %d\n", len(lote), len(mensajes))
+		}
 		if limite > 0 { // del más nuevo al más viejo también dentro del lote
 			sort.Slice(mensajes, func(i, j int) bool { return mensajes[i].uid > mensajes[j].uid })
 		}
@@ -212,6 +235,7 @@ func (a *AgenteCorreo) ProcesarNuevos(ctx context.Context) (revisados, guardados
 			}
 			// La misma persona que escribe otra vez (CV corregido, otro archivo) se consolida en su hoja.
 			if i := slices.IndexFunc(previas, func(p modelos.HojaVidaCorreo) bool { return mismaPersona(p, h) }); i >= 0 {
+				fmt.Printf("[auto] Buzón: correo %d (%q) es de la misma persona que %q; se une a su hoja de vida\n", m.uid, h.Asunto, previas[i].Nombre)
 				fusionarHoja(&previas[i], h)
 				continue
 			}
@@ -232,7 +256,7 @@ func (a *AgenteCorreo) ProcesarNuevos(ctx context.Context) (revisados, guardados
 			}
 			continue // sin puntero hasta terminar: si se corta, la próxima vez vuelve a empezar por lo nuevo
 		}
-		estado.UltimoUID = lote[len(lote)-1]
+		estado.UltimoUID = max(estado.UltimoUID, lote[len(lote)-1]) // la relectura de correos viejos no retrocede el puntero
 		if err := utilidades.EscribirJSONAtomico(a.rutaEstado(), estado, true); err != nil {
 			return revisados, guardados, err
 		}
@@ -359,6 +383,21 @@ func nombreDeAdjunto(nombre, tipo string, n int) string {
 	return nombre
 }
 
+// nombreSegunContenido reconoce un PDF o un .docx por su contenido cuando el nombre no dice qué es (nombre
+// con caracteres que no se pudieron leer, sin extensión, o tipo «octet-stream»).
+func nombreSegunContenido(nombre string, datos []byte) string {
+	if esDocumentoCV(nombre) || esImagen(nombre) {
+		return nombre
+	}
+	switch {
+	case bytes.HasPrefix(datos, []byte("%PDF-")):
+		return nombre + ".pdf"
+	case bytes.HasPrefix(datos, []byte("PK\x03\x04")) && bytes.Contains(datos, []byte("word/document.xml")):
+		return nombre + ".docx"
+	}
+	return nombre
+}
+
 // analizarCorreo decide si el correo es una hoja de vida y, si lo es, extrae todo. El segundo valor
 // es falso cuando el correo no tiene nada que ver (publicidad, avisos del sistema, etc.).
 func (a *AgenteCorreo) analizarCorreo(ctx context.Context, m correoCrudo) (modelos.HojaVidaCorreo, bool) {
@@ -405,16 +444,19 @@ func (a *AgenteCorreo) analizarCorreo(ctx context.Context, m correoCrudo) (model
 				// Muchos clientes mandan el PDF o el Word «en línea» en vez de como adjunto; antes se descartaban.
 				_, dispo, _ := cab.ContentDisposition()
 				nombre := nombreDeAdjunto(firstNonEmpty(dispo["filename"], params["name"]), tipo, len(adjuntos)+1)
-				if esDocumentoCV(nombre) {
+				_, tipoConocido := extensionesPorTipo[strings.ToLower(tipo)]
+				if tipoConocido || esDocumentoCV(nombre) || strings.EqualFold(tipo, "application/octet-stream") {
 					datos, _ := io.ReadAll(io.LimitReader(parte.Body, maxBytesAdjunto))
-					adjuntos = append(adjuntos, adjuntoLeido{nombre: nombre, datos: datos})
+					if nombre = nombreSegunContenido(nombre, datos); esDocumentoCV(nombre) {
+						adjuntos = append(adjuntos, adjuntoLeido{nombre: nombre, datos: datos})
+					}
 				}
 			}
 		case *gomail.AttachmentHeader:
 			nombre, _ := cab.Filename()
 			tipo, _, _ := cab.ContentType()
-			nombre = nombreDeAdjunto(nombre, tipo, len(adjuntos)+1)
 			datos, _ := io.ReadAll(io.LimitReader(parte.Body, maxBytesAdjunto))
+			nombre = nombreSegunContenido(nombreDeAdjunto(nombre, tipo, len(adjuntos)+1), datos)
 			adjuntos = append(adjuntos, adjuntoLeido{nombre: nombre, datos: datos})
 		}
 	}
@@ -519,6 +561,8 @@ func (a *AgenteCorreo) analizarCorreo(ctx context.Context, m correoCrudo) (model
 		motivo = "trae un adjunto PDF o Word"
 	}
 	if motivo == "" {
+		fmt.Printf("[auto] Buzón: correo %d descartado (asunto %q, de %s): ni PDF/Word adjunto ni estructura de hoja de vida; adjuntos: %q\n",
+			m.uid, h.Asunto, h.Remitente, nombresAdjuntos)
 		return h, false
 	}
 	h.Motivo = motivo
@@ -588,8 +632,12 @@ func guardarAdjunto(carpeta string, ad adjuntoLeido) (string, error) {
 	nombre := reCaracteresInvalidos.ReplaceAllString(filepath.Base(ad.nombre), "_")
 	ruta := filepath.Join(carpeta, nombre)
 	for i := 2; ; i++ { // dos adjuntos con el mismo nombre no se pisan
-		if _, err := os.Stat(ruta); errors.Is(err, os.ErrNotExist) {
+		info, err := os.Stat(ruta)
+		if errors.Is(err, os.ErrNotExist) {
 			break
+		}
+		if err == nil && info.Size() == int64(len(ad.datos)) {
+			return ruta, nil // el mismo archivo ya guardado (correo vuelto a leer): no se copia otra vez
 		}
 		ruta = filepath.Join(carpeta, fmt.Sprintf("%d_%s", i, nombre))
 	}

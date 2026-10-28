@@ -69,3 +69,21 @@ func TestTextoCandidatoSumaCVPersonal(t *testing.T) {
 		t.Fatalf("el CV del correo se repitió: %q", got)
 	}
 }
+
+func TestNombreSegunContenido(t *testing.T) {
+	docx := append([]byte("PK\x03\x04"), []byte("...[Content_Types].xml...word/document.xml...")...)
+	for _, c := range []struct {
+		nombre string
+		datos  []byte
+		quiere string
+	}{
+		{"adjunto_1", []byte("%PDF-1.7 ..."), "adjunto_1.pdf"},
+		{"HV Mar\xeda", docx, "HV Mar\xeda.docx"},
+		{"foto.jpg", []byte("%PDF-1.7"), "foto.jpg"},
+		{"factura", []byte("hola"), "factura"},
+	} {
+		if got := nombreSegunContenido(c.nombre, c.datos); got != c.quiere {
+			t.Errorf("nombreSegunContenido(%q) = %q, quería %q", c.nombre, got, c.quiere)
+		}
+	}
+}
