@@ -204,6 +204,7 @@ func (a *AgenteCorreo) ProcesarNuevos(ctx context.Context) (revisados, guardados
 		masNuevo = nuevos[len(nuevos)-1]
 	}
 
+	var yaGuardados, unidos, descartados int
 	for ini := 0; ini < len(nuevos); ini += correosPorLote {
 		if ctx.Err() != nil {
 			break
@@ -225,8 +226,17 @@ func (a *AgenteCorreo) ProcesarNuevos(ctx context.Context) (revisados, guardados
 			}
 			revisados++
 			h, ok := a.analizarCorreo(ctx, m)
+			if !ok {
+				descartados++
+				continue
+			}
 			// Un reenvío ("Fwd:") o un segundo envío del mismo CV trae los mismos adjuntos.
-			if !ok || conocidos[h.MessageID] || (h.HuellaAdjuntos != "" && conocidos["huella:"+h.HuellaAdjuntos]) {
+			if conocidos[h.MessageID] || (h.HuellaAdjuntos != "" && conocidos["huella:"+h.HuellaAdjuntos]) {
+				yaGuardados++
+				// Al releer, si ahora se pudo leer más (p. ej. el PDF que venía como enlace) se completa su hoja.
+				if i := slices.IndexFunc(previas, func(p modelos.HojaVidaCorreo) bool { return p.MessageID == h.MessageID }); i >= 0 {
+					fusionarHoja(&previas[i], h)
+				}
 				continue
 			}
 			conocidos[h.MessageID] = true
@@ -237,10 +247,17 @@ func (a *AgenteCorreo) ProcesarNuevos(ctx context.Context) (revisados, guardados
 			if i := slices.IndexFunc(previas, func(p modelos.HojaVidaCorreo) bool { return mismaPersona(p, h) }); i >= 0 {
 				fmt.Printf("[auto] Buzón: correo %d (%q) es de la misma persona que %q; se une a su hoja de vida\n", m.uid, h.Asunto, previas[i].Nombre)
 				fusionarHoja(&previas[i], h)
+				unidos++
 				continue
 			}
 			previas = append(previas, h)
 			guardados++
+			aviso := ""
+			if h.InteresConductor == ConductorNo {
+				aviso = " → NO entra al análisis"
+			}
+			fmt.Printf("[auto] Buzón: hoja de vida nueva de %q (correo %d, asunto %q): interés en conducir «%s» (%s)%s\n",
+				nombreDe(h), m.uid, h.Asunto, h.InteresConductor, h.MotivoConductor, aviso)
 		}
 		// Se avanza el puntero solo cuando el lote quedó guardado: si algo falla se reintenta.
 		if err := utilidades.EscribirJSONAtomico(a.rutaResultados(), previas, true); err != nil {
@@ -266,6 +283,8 @@ func (a *AgenteCorreo) ProcesarNuevos(ctx context.Context) (revisados, guardados
 		estado.UltimoUID = masNuevo
 		_ = utilidades.EscribirJSONAtomico(a.rutaEstado(), estado, true)
 	}
+	fmt.Printf("[auto] Buzón: %d correos revisados → %d hojas de vida nuevas, %d ya estaban guardadas, %d unidas a otra hoja, %d descartados\n",
+		revisados, guardados, yaGuardados, unidos, descartados)
 	return revisados, guardados, ctx.Err()
 }
 
@@ -279,7 +298,10 @@ func mismaPersona(a, b modelos.HojaVidaCorreo) bool {
 	if a.Correo != "" && !strings.EqualFold(a.Correo, a.Remitente) && strings.EqualFold(a.Correo, b.Correo) && !strings.EqualFold(b.Correo, b.Remitente) {
 		return true
 	}
-	return a.Remitente != "" && a.Remitente == b.Remitente && utilidades.NombresCoinciden(a.Nombre, b.Nombre, 2)
+	// Con un solo nombre («Carlos») no basta: un formulario web manda a muchas personas desde el mismo remitente.
+	return a.Remitente != "" && a.Remitente == b.Remitente &&
+		len(utilidades.TokensNombre(a.Nombre)) >= 2 && len(utilidades.TokensNombre(b.Nombre)) >= 2 &&
+		utilidades.NombresCoinciden(a.Nombre, b.Nombre, 2)
 }
 
 // fusionarHoja suma a la hoja existente lo que trae el correo nuevo de la misma persona: sus archivos, los
@@ -463,6 +485,21 @@ func (a *AgenteCorreo) analizarCorreo(ctx context.Context, m correoCrudo) (model
 	cuerpo := textoPlano
 	if strings.TrimSpace(cuerpo) == "" {
 		cuerpo = html.UnescapeString(reEtiquetasHTML.ReplaceAllString(textoHTML, " "))
+	}
+
+	// Los formularios web traen la hoja de vida como enlace de descarga, no como adjunto.
+	for _, e := range enlacesDeDocumentos(textoHTML) {
+		if slices.ContainsFunc(adjuntos, func(ad adjuntoLeido) bool { return strings.EqualFold(ad.nombre, e.nombre) }) {
+			continue
+		}
+		if datos, err := descargarDocumento(ctx, e.url); err != nil {
+			fmt.Printf("[!] Buzón: correo %d: no se pudo bajar %q del enlace: %v\n", m.uid, e.nombre, err)
+		} else {
+			adjuntos = append(adjuntos, adjuntoLeido{nombre: e.nombre, datos: datos})
+		}
+	}
+	if len(adjuntos) == 0 && strings.Contains(strings.ToLower(cuerpo), "attachment(s)") {
+		fmt.Printf("[!] Buzón: correo %d (%q) dice traer archivos, pero no se encontró enlace ni adjunto con un PDF o Word\n", m.uid, h.Asunto)
 	}
 
 	// ¿Por qué este correo cuenta como hoja de vida? Se busca muy abierto: asunto, nombre de los
