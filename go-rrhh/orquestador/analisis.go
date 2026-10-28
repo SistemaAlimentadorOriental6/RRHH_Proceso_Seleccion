@@ -376,6 +376,7 @@ func (a *Analizador) Analizar(ctx context.Context, oferta modelos.OfertaLaboral)
 	defer acum.finalizar()
 
 	vistos := make(map[string]bool)
+	var orden []string // las fichas en el orden del listado: de ahí salen los números de las personas
 	cola := make(chan turno, 4096)
 	// Los ya analizados van por su propia fila: confirmarlos es inmediato y antes esperaban detrás del
 	// análisis lento (captchas, portales) de quien iba delante, y la pantalla los mostraba "en cola".
@@ -404,6 +405,9 @@ func (a *Analizador) Analizar(ctx context.Context, oferta modelos.OfertaLaboral)
 	}()
 
 	errListado := a.fuente.ObtenerCandidatosStream(ctx, oferta.URLCandidatos, a.opts.Limite, func(c *modelos.Candidato) {
+		if !vistos[c.URLDetalle] {
+			orden = append(orden, c.URLDetalle)
+		}
 		vistos[c.URLDetalle] = true
 		total := a.contar(func(r *ResumenAnalisis) { r.Descubiertos++ }).Descubiertos
 		// Los nuevos pasan por la misma fila, en orden de aparición: con concurrencia 1 se termina a una
@@ -441,13 +445,9 @@ func (a *Analizador) Analizar(ctx context.Context, oferta modelos.OfertaLaboral)
 	if listadoCompleto && a.opts.Limite == 0 {
 		acum.conservarSoloVistos(vistos)
 		if a.persistencia != nil {
-			urls := make([]string, 0, len(vistos))
-			for u := range vistos {
-				urls = append(urls, u)
-			}
 			retirados := ausentesConfirmados(oferta.ID, previos, vistos)
 			ctxBase, cancel := context.WithTimeout(context.Background(), plazoPersistencia)
-			if err := a.persistencia.MarcarVigentes(ctxBase, oferta, urls, retirados); err != nil {
+			if err := a.persistencia.MarcarVigentes(ctxBase, oferta, orden, retirados); err != nil {
 				fmt.Printf("[!] No se pudo actualizar en la base de datos quiénes siguen postulados: %v\n", err)
 			}
 			cancel()

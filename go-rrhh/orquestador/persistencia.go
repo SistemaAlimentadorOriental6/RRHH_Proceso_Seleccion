@@ -15,8 +15,8 @@ type Persistencia interface {
 	GuardarCandidato(ctx context.Context, oferta modelos.OfertaLaboral, c *modelos.Candidato) error
 	// CandidatosPrevios devuelve lo ya analizado de la vacante, indexado por la URL de la ficha.
 	CandidatosPrevios(ctx context.Context, oferta modelos.OfertaLaboral) (map[string]*modelos.Candidato, error)
-	// MarcarVigentes deja vigentes a los postulantes de urls y retira a los de retirados; los demás
-	// quedan como estaban.
+	// MarcarVigentes deja vigentes a los postulantes de urls (en el orden del listado, que es su número)
+	// y retira a los de retirados; los demás quedan como estaban.
 	MarcarVigentes(ctx context.Context, oferta modelos.OfertaLaboral, urls, retirados []string) error
 }
 

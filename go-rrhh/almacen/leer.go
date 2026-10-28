@@ -95,7 +95,8 @@ func (a *Almacen) CandidatosPrevios(ctx context.Context, oferta modelos.OfertaLa
 
 // MarcarVigentes deja vigentes a los postulantes cuya ficha aparece en urls y retira de la vacante a
 // los de retirados (su historial se conserva); a los demás no los toca. Se llama al terminar un
-// listado completo.
+// listado completo. urls va en el orden del listado: de ahí sale el número de cada persona, que se
+// renumera para que no queden repetidos los de análisis anteriores.
 func (a *Almacen) MarcarVigentes(ctx context.Context, oferta modelos.OfertaLaboral, urls, retirados []string) error {
 	if len(urls) == 0 && len(retirados) == 0 {
 		return nil
@@ -119,6 +120,12 @@ func (a *Almacen) MarcarVigentes(ctx context.Context, oferta modelos.OfertaLabor
 	return a.enTx(ctx, func(tx *sql.Tx) error {
 		if err := marcar(tx, 1, urls); err != nil {
 			return err
+		}
+		for i, u := range urls {
+			if err := exec(ctx, tx, `UPDATE perfiles pf JOIN postulaciones po ON po.id = pf.postulacion_id
+			                            SET pf.indice = ? WHERE po.oferta_id = ? AND pf.url_detalle = ?`, i+1, ofertaID, u); err != nil {
+				return err
+			}
 		}
 		return marcar(tx, 0, retirados)
 	})
@@ -214,6 +221,7 @@ func (a *Almacen) candidatosDonde(ctx context.Context, conTexto bool, cond strin
 	if len(candidatos) == 0 {
 		return candidatos, nil
 	}
+	indicesUnicos(candidatos)
 
 	// Motivos de descarte de la evaluación vigente, en el orden en que se guardaron (UUID v7).
 	motivos, err := a.db.QueryContext(ctx,
@@ -295,6 +303,25 @@ func (a *Almacen) candidatosDonde(ctx context.Context, conTexto bool, cond strin
 		}
 	}
 	return candidatos, archivos.Err()
+}
+
+// indicesUnicos da un número propio (al final) a quien comparte el suyo con otro de la lista, que llega
+// ordenada por número y fecha: se queda con él el más antiguo. El número es la posición que tuvo en el
+// listado de Computrabajo al analizarlo, y el listado se reordena cuando llegan postulados nuevos, así que
+// en la base quedan números repetidos; la pantalla usa el número como clave y mostraba solo a uno de ellos.
+func indicesUnicos(candidatos []modelos.Candidato) {
+	usados := make(map[int]bool, len(candidatos))
+	ultimo := 0
+	for _, c := range candidatos {
+		ultimo = max(ultimo, c.Indice)
+	}
+	for i := range candidatos {
+		if usados[candidatos[i].Indice] {
+			ultimo++
+			candidatos[i].Indice = ultimo
+		}
+		usados[candidatos[i].Indice] = true
+	}
 }
 
 // armarCandidato reconstruye los datos propios del candidato y su evaluación (sin motivos,

@@ -305,7 +305,11 @@ export class SesionAnalisis {
       // Si mientras tanto arrancó un análisis en vivo, sus datos mandan.
       if (this.activo || this.candidatos.length > 0) return;
       this.etag = etag;
-      for (const r of guardados ?? []) this.porIndice[r.indice] = candidatoDesdeApi(r, true);
+      for (const r of guardados ?? []) {
+        // Dos personas con el mismo número (el listado se reordena): la segunda va al final y no pisa a la primera.
+        const indice = this.porIndice[r.indice] ? Math.max(...Object.keys(this.porIndice).map(Number)) + 1 : r.indice;
+        this.porIndice[indice] = candidatoDesdeApi({ ...r, indice }, true);
+      }
       this.errorCarga = null;
       this.reintentosCarga = 0;
     } catch (error) {
