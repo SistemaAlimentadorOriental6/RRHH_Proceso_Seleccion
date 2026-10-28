@@ -172,7 +172,7 @@ func (a *AgenteCorreo) ProcesarNuevos(ctx context.Context) (revisados, guardados
 	}
 
 	// Primera lectura con tope: se recorre de los correos más nuevos a los más viejos y se corta al
-	// juntar N hojas de vida; el puntero salta al más nuevo, así después solo se leen los que lleguen.
+	// revisar N correos; el puntero salta al más nuevo, así después solo se leen los que lleguen.
 	limite := 0
 	if estado.UltimoUID == 0 && a.UltimasEnPrimeraLectura > 0 {
 		limite = a.UltimasEnPrimeraLectura
@@ -196,7 +196,7 @@ func (a *AgenteCorreo) ProcesarNuevos(ctx context.Context) (revisados, guardados
 			sort.Slice(mensajes, func(i, j int) bool { return mensajes[i].uid > mensajes[j].uid })
 		}
 		for _, m := range mensajes {
-			if limite > 0 && guardados >= limite {
+			if limite > 0 && revisados >= limite {
 				break
 			}
 			revisados++
@@ -217,7 +217,7 @@ func (a *AgenteCorreo) ProcesarNuevos(ctx context.Context) (revisados, guardados
 			return revisados, guardados, fmt.Errorf("no se pudieron guardar las hojas de vida: %w", err)
 		}
 		if limite > 0 {
-			if guardados >= limite {
+			if revisados >= limite {
 				estado.UltimoUID = masNuevo
 				if err := utilidades.EscribirJSONAtomico(a.rutaEstado(), estado, true); err != nil {
 					return revisados, guardados, err
@@ -340,11 +340,14 @@ func (a *AgenteCorreo) analizarCorreo(ctx context.Context, m correoCrudo) (model
 	// ¿Por qué este correo cuenta como hoja de vida? Se busca muy abierto: asunto, nombre de los
 	// adjuntos y comienzo del cuerpo, con tolerancia a errores de digitación.
 	var nombresAdjuntos []string
-	hayDocumento := false
+	hayDocumento, hayPDFoWord := false, false
 	for _, ad := range adjuntos {
 		nombresAdjuntos = append(nombresAdjuntos, ad.nombre)
 		if esDocumentoCV(ad.nombre) {
 			hayDocumento = true
+		}
+		if esDocumentoWordOPDF(ad.nombre) {
+			hayPDFoWord = true
 		}
 	}
 	encabezado := h.Asunto + " " + strings.Join(nombresAdjuntos, " ") + " " + cuerpo[:min(len(cuerpo), 1500)]
@@ -423,6 +426,11 @@ func (a *AgenteCorreo) analizarCorreo(ctx context.Context, m correoCrudo) (model
 	if motivo == "" && len(cuerpo) < 6000 && pareceHojaDeVida(cuerpo) &&
 		(utilidades.ExtraerContacto(cuerpo, "").Telefono != "" || cedulaEnTexto(cuerpo) != "") {
 		motivo = "el texto del correo tiene estructura de hoja de vida"
+	}
+	// Sin mirar el asunto: todo correo con un PDF o Word adjunto se toma como posible hoja de vida. Lo que
+	// no hable de conducir queda guardado con interés «no» y no gasta consultas (ver HojasParaAnalizar).
+	if motivo == "" && hayPDFoWord {
+		motivo = "trae un adjunto PDF o Word"
 	}
 	if motivo == "" {
 		return h, false

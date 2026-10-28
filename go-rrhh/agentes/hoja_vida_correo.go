@@ -25,7 +25,7 @@ var reNoAlfanumerico = regexp.MustCompile(`[^a-z0-9]+`)
 // normalizarTexto pasa a minúsculas, quita tildes y deja solo letras, números y espacios simples:
 // "HOJA_DE_VIDA-Juan.pdf" → "hoja de vida juan pdf".
 func normalizarTexto(s string) string {
-	sin, _, err := transform.String(quitarTildes(),strings.ToLower(s))
+	sin, _, err := transform.String(quitarTildes(), strings.ToLower(s))
 	if err != nil {
 		sin = strings.ToLower(s)
 	}
@@ -217,6 +217,16 @@ func necesitaLecturaConIA(texto string) bool {
 func esDocumentoCV(nombre string) bool {
 	switch strings.ToLower(filepath.Ext(nombre)) {
 	case ".pdf", ".doc", ".docx", ".odt", ".rtf", ".txt":
+		return true
+	}
+	return false
+}
+
+// esDocumentoWordOPDF dice si un adjunto es un PDF o un documento de Word: con uno de esos el correo
+// se toma como hoja de vida sin importar el asunto.
+func esDocumentoWordOPDF(nombre string) bool {
+	switch strings.ToLower(filepath.Ext(nombre)) {
+	case ".pdf", ".doc", ".docx":
 		return true
 	}
 	return false

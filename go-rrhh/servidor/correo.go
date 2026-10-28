@@ -104,7 +104,10 @@ func (c *ControladorRRHH) cicloAutomatico() {
 	}
 	// El buzón se vigila desde ya, en paralelo: no espera a que termine el recorrido inicial de Computrabajo.
 	if c.cfg.CorreoActivo() {
+		log.Printf("[auto] Vigilando el buzón %s cada %s", c.cfg.CorreoUsuario, cada)
 		go c.vigilarBuzon(ctx, cada)
+	} else {
+		log.Printf("[auto] Buzón NO vigilado: faltan CORREO_USUARIO y CORREO_CLAVE en el .env")
 	}
 
 	vistos := map[string]int{} // inscritos de cada vacante la última vez que se miró
@@ -204,12 +207,14 @@ func (c *ControladorRRHH) vigilarBuzon(ctx context.Context, cada time.Duration) 
 	porAnalizar := true // al arrancar se analiza lo que ya estuviera guardado sin analizar
 	for {
 		protegido("vigilancia del buzón", func() {
-			_, guardadas, err := c.agenteCorreo().ProcesarNuevos(ctx)
+			revisados, guardadas, err := c.agenteCorreo().ProcesarNuevos(ctx)
 			if err != nil && ctx.Err() == nil {
 				log.Printf("[auto] Buzón: %v", err)
 			}
+			if revisados > 0 {
+				log.Printf("[auto] Buzón: %d correos nuevos revisados, %d hojas de vida", revisados, guardadas)
+			}
 			if guardadas > 0 {
-				log.Printf("[auto] Buzón: %d hojas de vida nuevas; se analizan", guardadas)
 				porAnalizar = true
 			}
 			if porAnalizar && ctx.Err() == nil {
