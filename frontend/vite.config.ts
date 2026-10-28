@@ -7,7 +7,8 @@ export default defineConfig({
     port: 3001,
     proxy: {
       '/api': {
-        target: 'http://192.168.90.25:3002/api',
+        //target: 'https://procesos-disciplinarios.sao6.com.co/api',
+        target: 'http://localhost:3002',
         changeOrigin: true
       }
     }

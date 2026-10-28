@@ -6,6 +6,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"io"
+	"regexp"
 	"strings"
 )
 
@@ -21,22 +22,47 @@ func ExtraerTextoDocx(ruta string) (string, error) {
 	}
 	defer zr.Close()
 
+	// Primero el cuerpo y después encabezados y pies de página: ahí suelen ir el teléfono y el correo.
+	var cuerpo string
+	var extras []string
+	hayCuerpo := false
 	for _, f := range zr.File {
-		if f.Name != "word/document.xml" {
+		principal := f.Name == "word/document.xml"
+		if !principal && !reEncabezadoPie.MatchString(f.Name) {
 			continue
 		}
-		rc, err := f.Open()
+		texto, err := textoDeParteDocx(f)
 		if err != nil {
-			return "", err
+			if principal {
+				return "", err
+			}
+			continue // un encabezado dañado no impide leer el cuerpo
 		}
-		defer rc.Close()
-		datos, err := io.ReadAll(io.LimitReader(rc, limiteDocx))
-		if err != nil {
-			return "", err
+		if principal {
+			cuerpo, hayCuerpo = texto, true
+		} else if strings.TrimSpace(texto) != "" {
+			extras = append(extras, texto)
 		}
-		return textoDeDocumentoXML(datos)
 	}
-	return "", fmt.Errorf("el .docx no tiene word/document.xml")
+	if !hayCuerpo {
+		return "", fmt.Errorf("el .docx no tiene word/document.xml")
+	}
+	return strings.TrimSpace(cuerpo + "\n" + strings.Join(extras, "\n")), nil
+}
+
+var reEncabezadoPie = regexp.MustCompile(`^word/(header|footer)\d*\.xml$`)
+
+func textoDeParteDocx(f *zip.File) (string, error) {
+	rc, err := f.Open()
+	if err != nil {
+		return "", err
+	}
+	defer rc.Close()
+	datos, err := io.ReadAll(io.LimitReader(rc, limiteDocx))
+	if err != nil {
+		return "", err
+	}
+	return textoDeDocumentoXML(datos)
 }
 
 // textoDeDocumentoXML junta el contenido de los <w:t> separando párrafos con saltos de línea.

@@ -54,3 +54,68 @@ func TestTextoPDFNativoNoEntraEnPanicoConBasura(t *testing.T) {
 		t.Fatal("un PDF roto debería dar error")
 	}
 }
+
+// pdfConContenido arma un PDF de una página con el contenido dado y una fuente con anchos (500 por letra),
+// como las de un PDF de Word: así la posición de cada letra es real y se puede reconstruir la línea.
+func pdfConContenido(contenido string) []byte {
+	var b bytes.Buffer
+	var offsets []int
+	obj := func(cuerpo string) {
+		offsets = append(offsets, b.Len())
+		fmt.Fprintf(&b, "%d 0 obj\n%s\nendobj\n", len(offsets), cuerpo)
+	}
+	b.WriteString("%PDF-1.4\n")
+	anchos := strings.TrimSpace(strings.Repeat("500 ", 224))
+	obj("<< /Type /Catalog /Pages 2 0 R >>")
+	obj("<< /Type /Pages /Kids [3 0 R] /Count 1 >>")
+	obj("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>")
+	obj(fmt.Sprintf("<< /Length %d >>\nstream\n%s\nendstream", len(contenido), contenido))
+	obj("<< /Type /Font /Subtype /TrueType /BaseFont /Arial /FirstChar 32 /LastChar 255 /Widths [" + anchos + "] /Encoding /WinAnsiEncoding >>")
+	inicio := b.Len()
+	fmt.Fprintf(&b, "xref\n0 %d\n0000000000 65535 f \n", len(offsets)+1)
+	for _, o := range offsets {
+		fmt.Fprintf(&b, "%010d 00000 n \n", o)
+	}
+	fmt.Fprintf(&b, "trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n", len(offsets)+1, inicio)
+	return b.Bytes()
+}
+
+// El texto debe salir en líneas, con espacios entre palabras separadas solo por un hueco, y con las
+// celdas lejanas en líneas distintas (antes salía todo pegado y sin saltos).
+func TestTextoPDFNativoConservaLineas(t *testing.T) {
+	contenido := strings.Join([]string{
+		"BT /F1 10 Tf 72 700 Td (Empresa : ALIANZA MAI) Tj ET",
+		"BT /F1 10 Tf 72 686 Td (Cargo : Operador) Tj ET",
+		"BT /F1 10 Tf 72 672 Td [(Tiempo)-500(laborado) -200 (: 4 años 6 meses)] TJ ET",
+		"BT /F1 10 Tf 72 658 Td (Telefono) Tj ET BT /F1 10 Tf 300 658 Td (3116324868) Tj ET",
+		"BT /F1 10 Tf 72 644 Td (Empresa : TEMSA) Tj ET",
+		"BT /F1 10 Tf 72 630 Td (Cargo : Conductor) Tj ET",
+		"BT /F1 10 Tf 72 616 Td (Tiempo laborado : 5 meses) Tj ET",
+	}, "\n")
+	ruta := filepath.Join(t.TempDir(), "cv.pdf")
+	if err := os.WriteFile(ruta, pdfConContenido(contenido), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	texto, err := textoPDFNativo(ruta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, linea := range []string{"Empresa : ALIANZA MAI", "Cargo : Operador", "Tiempo laborado", "Telefono\n3116324868"} {
+		if !strings.Contains(texto, linea) {
+			t.Errorf("falta %q en:\n%s", linea, texto)
+		}
+	}
+	trabajos := TrabajosDeCV(texto)
+	if len(trabajos) != 2 || trabajos[0].Cargo != "Operador" || trabajos[1].Empresa != "TEMSA" || trabajos[1].Duracion != "5 meses" {
+		t.Errorf("trabajos mal leídos: %+v", trabajos)
+	}
+}
+
+func TestTextoPlausible(t *testing.T) {
+	if !textoPlausible("EXPERIENCIA LABORAL Empresa: ALIANZA MAI. Cargo: Operador, 4 años 6 meses") {
+		t.Error("un texto normal debe ser plausible")
+	}
+	if textoPlausible("\x00\x14QE\x01\x02\x03\x04\x05\x06\x07\x08\x0b\x0c\x0e\x0f\x10\x11\x12\x13\x14\x15\x16\x17") {
+		t.Error("la basura binaria no es plausible")
+	}
+}

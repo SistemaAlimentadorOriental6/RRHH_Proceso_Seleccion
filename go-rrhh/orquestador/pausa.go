@@ -46,11 +46,19 @@ func textoHojaDeVida(c *modelos.Candidato) string {
 		case ".docx":
 			texto, err = utilidades.ExtraerTextoDocx(ruta)
 		}
-		if err == nil && texto != "" {
+		if err == nil && texto != "" && !yaIncluido(strings.Join(partes, "\n"), texto) {
 			partes = append(partes, texto)
 		}
 	}
 	return strings.Join(partes, "\n")
+}
+
+// yaIncluido dice si `texto` ya contiene el comienzo de `otro` (sin contar espacios): las hojas de vida del
+// correo traen en el perfil el mismo texto del archivo, y pegarlo otra vez gasta el límite de la IA y le hace
+// contar dos veces cada empleo.
+func yaIncluido(texto, otro string) bool {
+	otro = strings.Join(strings.Fields(otro), " ")
+	return strings.Contains(strings.Join(strings.Fields(texto), " "), otro[:min(len(otro), 300)])
 }
 
 // cedulaDePostulacionPrevia busca si la misma persona ya se postuló antes y dejó su cédula, y

@@ -100,3 +100,32 @@ func TestExtraerTextoDocxRechazaArchivosInvalidos(t *testing.T) {
 		t.Error("un ZIP sin document.xml debe fallar")
 	}
 }
+
+// El teléfono y el correo suelen ir en el encabezado o el pie de página de Word.
+func TestExtraerTextoDocxIncluyeEncabezadoYPie(t *testing.T) {
+	ruta := filepath.Join(t.TempDir(), "cv.docx")
+	f, err := os.Create(ruta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zw := zip.NewWriter(f)
+	partes := map[string]string{
+		"word/document.xml": `<w:document xmlns:w="x"><w:body><w:p><w:r><w:t>Cuerpo del CV</w:t></w:r></w:p></w:body></w:document>`,
+		"word/header1.xml":  `<w:hdr xmlns:w="x"><w:p><w:r><w:t>Celular 3116324868</w:t></w:r></w:p></w:hdr>`,
+		"word/footer1.xml":  `<w:ftr xmlns:w="x"><w:p><w:r><w:t>juan@correo.com</w:t></w:r></w:p></w:ftr>`,
+	}
+	for _, nombre := range []string{"word/header1.xml", "word/document.xml", "word/footer1.xml"} {
+		w, _ := zw.Create(nombre)
+		w.Write([]byte(partes[nombre]))
+	}
+	zw.Close()
+	f.Close()
+
+	texto, err := ExtraerTextoDocx(ruta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(texto, "Cuerpo del CV") || !strings.Contains(texto, "3116324868") || !strings.Contains(texto, "juan@correo.com") {
+		t.Fatalf("texto = %q", texto)
+	}
+}

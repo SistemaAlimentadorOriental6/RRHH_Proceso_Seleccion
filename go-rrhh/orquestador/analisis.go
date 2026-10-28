@@ -408,8 +408,12 @@ func (a *Analizador) Analizar(ctx context.Context, oferta modelos.OfertaLaboral)
 		// Los nuevos pasan por la misma fila, en orden de aparición: con concurrencia 1 se termina a una
 		// persona antes de empezar con la siguiente.
 		t := turno{c: c}
-		if previo, ok := previos[c.URLDetalle]; ok && a.cacheValido(previo) {
-			t.previo = previo
+		if previo, ok := previos[c.URLDetalle]; ok {
+			if motivo := a.motivoSinCache(previo); motivo == "" {
+				t.previo = previo
+			} else {
+				fmt.Printf("[cache] %s se vuelve a analizar: %s\n", c.Nombre, motivo)
+			}
 		}
 		// "cache" avisa a la pantalla que no es una persona nueva: ya tiene resultado y solo se confirma.
 		a.rep.Emitir("candidato.descubierto", map[string]any{"indice": c.Indice, "nombre": c.Nombre, "descubiertos": total, "cache": t.previo != nil})
@@ -495,34 +499,45 @@ func cargarPrevios(ruta string) map[string]*modelos.Candidato {
 	return previos
 }
 
-// cacheValido decide si un análisis previo se reutiliza: debe estar terminado, sin errores
-// de consulta, y con las validaciones que ahora se piden (no un descarte temprano si se pide completo).
-func (a *Analizador) cacheValido(c *modelos.Candidato) bool {
+// motivoSinCache dice por qué un análisis previo NO se reutiliza (y se rehace al candidato); vacío si se
+// reutiliza. Debe estar terminado, sin errores de consulta, y con las validaciones que ahora se piden.
+func (a *Analizador) motivoSinCache(c *modelos.Candidato) string {
 	if a.opts.Forzar {
-		return false
+		return "se pidió forzar el análisis"
 	}
 	// En pausa por un dato que falta: ya está en manos del proceso de solicitud (esperando datos,
 	// reanudándose o en revisión). No se vuelve a leer de Computrabajo en cada análisis; con
 	// forzar=1 sí se reprocesa desde cero.
 	if modelos.EnPausa(c.EstadoProceso) && c.EvaluacionIdoneidad != nil {
-		return true
+		return ""
 	}
-	if c.EvaluacionIdoneidad == nil || c.ErrorProceso != "" {
-		return false
+	if c.EvaluacionIdoneidad == nil {
+		return "no tiene evaluación guardada"
 	}
-	// Sin cédula nunca se pudo consultar nada: vale la pena volver a leer el perfil.
-	if len(soloDigitos(c.Cedula)) < 6 {
-		return false
+	if c.ErrorProceso != "" {
+		return "quedó pendiente: " + c.ErrorProceso
 	}
-	// Un análisis anterior a las capturas de pantalla no tiene evidencia que mostrar: se rehace una vez.
-	if len(c.Capturas) == 0 {
-		return false
+	ev := c.EvaluacionIdoneidad
+	if a.opts.Completo && ev.DescarteTemprano {
+		return "se descartó sin consultar todo y ahora se pide el análisis completo"
 	}
-	if a.opts.Completo && c.EvaluacionIdoneidad.DescarteTemprano {
-		return false
+	// Quien se descartó por una regla firme (género, edad...) no llegó a consultar ninguna fuente: no tiene
+	// capturas y, si no trae cédula, tampoco la tendrá. Volver a leerlo no cambia nada, y antes lo hacía en
+	// cada análisis y en cada reinicio.
+	if !ev.DescarteTemprano {
+		// Sin cédula nunca se pudo consultar nada: vale la pena volver a leer el perfil.
+		if len(soloDigitos(c.Cedula)) < 6 {
+			return "no tiene cédula"
+		}
+		// Un análisis anterior a las capturas de pantalla no tiene evidencia que mostrar: se rehace una vez.
+		if len(c.Capturas) == 0 {
+			return "no tiene capturas de pantalla"
+		}
 	}
-	return true
+	return ""
 }
+
+func (a *Analizador) cacheValido(c *modelos.Candidato) bool { return a.motivoSinCache(c) == "" }
 
 func (a *Analizador) procesarSeguro(ctx context.Context, c *modelos.Candidato, carpetaOferta string, acum *acumuladorResultados) {
 	defer func() {

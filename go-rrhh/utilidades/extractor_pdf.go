@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io"
+	"math"
 	"os"
 	"os/exec"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/ledongthuc/pdf"
 )
@@ -53,15 +55,15 @@ except Exception as e:
 
 	// 2. Respaldo en Go puro, para cuando no hay Python con PyMuPDF (p. ej. en el servidor). Antes aquí se
 	// buscaba texto entre paréntesis en los bytes del archivo y de un PDF comprimido salía basura binaria.
-	if texto, err := textoPDFNativo(rutaPDF); err == nil && len(strings.TrimSpace(texto)) > 20 {
+	if texto, err := textoPDFNativo(rutaPDF); err == nil && textoPlausible(texto) {
 		return limpiarTexto(texto), nil
 	}
 
 	return "", fmt.Errorf("no fue posible extraer texto del PDF: %s", rutaPDF)
 }
 
-// textoPDFNativo lee el texto de un PDF sin programas externos. La librería puede entrar en pánico con
-// archivos dañados: se trata como error.
+// textoPDFNativo lee el texto de un PDF sin programas externos, página por página y en líneas, como lo hace
+// PyMuPDF. La librería puede entrar en pánico con archivos dañados: se trata como error.
 func textoPDFNativo(rutaPDF string) (texto string, err error) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -73,12 +75,96 @@ func textoPDFNativo(rutaPDF string) (texto string, err error) {
 		return "", err
 	}
 	defer f.Close()
-	flujo, err := lector.GetPlainText()
-	if err != nil {
-		return "", err
+
+	var b strings.Builder
+	for i := 1; i <= lector.NumPage() && b.Len() < 2<<20; i++ {
+		b.WriteString(textoDePagina(lector.Page(i)))
+		b.WriteByte('\n')
 	}
-	datos, err := io.ReadAll(io.LimitReader(flujo, 2<<20))
-	return string(datos), err
+	return b.String(), nil
+}
+
+// textoDePagina arma el texto con las líneas de la página; si no se pudo (fuentes raras, contenido roto) usa
+// el texto plano de la librería, que no conserva los saltos de línea pero rescata las palabras.
+func textoDePagina(p pdf.Page) string {
+	if t := lineasDePagina(p); strings.TrimSpace(t) != "" {
+		return t
+	}
+	return textoPlanoDePagina(p)
+}
+
+func textoPlanoDePagina(p pdf.Page) (texto string) {
+	defer func() {
+		if recover() != nil {
+			texto = ""
+		}
+	}()
+	texto, _ = p.GetPlainText(nil)
+	return texto
+}
+
+// lineasDePagina agrupa las letras por su posición vertical, las ordena de izquierda a derecha y pone un
+// espacio donde hay hueco entre ellas. Un hueco grande (otra columna u otra celda de una tabla) abre una
+// línea nueva, así «Empresa: X» de una columna no se mezcla con el texto de la columna vecina.
+func lineasDePagina(p pdf.Page) (texto string) {
+	defer func() {
+		if recover() != nil {
+			texto = ""
+		}
+	}()
+	var letras []pdf.Text
+	for _, l := range p.Content().Text {
+		if l.S != "" && l.S != "\n" && l.S != "\r" {
+			letras = append(letras, l)
+		}
+	}
+	sort.SliceStable(letras, func(i, j int) bool { return letras[i].Y > letras[j].Y }) // de arriba abajo
+
+	var lineas [][]pdf.Text
+	for _, l := range letras {
+		tolerancia := math.Max(2, 0.45*l.FontSize)
+		if n := len(lineas); n > 0 && math.Abs(lineas[n-1][0].Y-l.Y) <= tolerancia {
+			lineas[n-1] = append(lineas[n-1], l)
+		} else {
+			lineas = append(lineas, []pdf.Text{l})
+		}
+	}
+
+	var b strings.Builder
+	for _, linea := range lineas {
+		sort.SliceStable(linea, func(i, j int) bool { return linea[i].X < linea[j].X })
+		for i, l := range linea {
+			if i > 0 {
+				ant := linea[i-1]
+				cuerpo := math.Max(ant.FontSize, 1)
+				hueco := l.X - (ant.X + ant.W)
+				switch {
+				case hueco > 5*cuerpo:
+					b.WriteByte('\n')
+				case hueco > 0.15*cuerpo && !strings.HasSuffix(b.String(), " ") && !strings.HasPrefix(l.S, " "):
+					b.WriteByte(' ')
+				}
+			}
+			b.WriteString(l.S)
+		}
+		b.WriteByte('\n')
+	}
+	return b.String()
+}
+
+// textoPlausible dice si lo extraído parece texto y no basura: casi todo letras, números, espacios y signos.
+func textoPlausible(texto string) bool {
+	total, buenos := 0, 0
+	for _, r := range texto {
+		if r == '\n' || r == '\r' || r == '\t' {
+			continue
+		}
+		total++
+		if unicode.IsLetter(r) || unicode.IsDigit(r) || unicode.IsSpace(r) || unicode.IsPunct(r) || unicode.IsSymbol(r) {
+			buenos++
+		}
+	}
+	return total > 20 && buenos*10 >= total*9
 }
 
 func limpiarTexto(texto string) string {
