@@ -87,3 +87,25 @@ func TestNombreSegunContenido(t *testing.T) {
 		}
 	}
 }
+
+func TestTextoIlegibleYLecturaConIA(t *testing.T) {
+	basura := "�\x034Q@\x1e�\x00QK mailto:paola@hotmail.com " + strings.Repeat("\x00\x14QE", 80)
+	pdfCrudo := "en-US ... endstream\r\nendobj\r\n24 0 obj mailto:paola@hotmail.com " + strings.Repeat("a", 100)
+	cv := "EXPERIENCIA LABORAL Empresa ALIANZA MAI Cargo Operador. Cedula 1037000111 Celular 3116324868 Perfil formacion academica referencias"
+	if !textoIlegible(basura) || !textoIlegible(pdfCrudo) || textoIlegible(cv) {
+		t.Fatal("mala clasificación de texto legible/ilegible")
+	}
+	// Antes estos pasaban por hoja de vida porque traían un correo.
+	if !necesitaLecturaConIA(basura) || !necesitaLecturaConIA(pdfCrudo) {
+		t.Fatal("la basura debe mandarse a leer con IA")
+	}
+}
+
+func TestFusionarReemplazaTextoIlegible(t *testing.T) {
+	vieja := modelos.HojaVidaCorreo{MessageID: "m", TextoCV: strings.Repeat("\x00\x14QE", 200), InteresConductor: ConductorNo, MotivoConductor: "IA: corrupto"}
+	nueva := modelos.HojaVidaCorreo{MessageID: "m2", TextoCV: "Empresa : TEMSA Cargo : Conductor", InteresConductor: ConductorSi, MotivoConductor: "cargo conductor", TextoLeido: true}
+	fusionarHoja(&vieja, nueva)
+	if vieja.TextoCV != nueva.TextoCV || vieja.InteresConductor != ConductorSi || vieja.MessageID != "m" {
+		t.Fatalf("no se reparó la hoja: %+v", vieja)
+	}
+}

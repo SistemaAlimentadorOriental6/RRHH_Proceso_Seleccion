@@ -161,6 +161,10 @@ func (a *AgenteCorreo) ProcesarNuevos(ctx context.Context) (revisados, guardados
 	// Al arrancar se vuelven a mirar los últimos correos ya leídos: los que se descartaron con reglas
 	// anteriores (o cuyo adjunto no se pudo leer) no se habrían vuelto a ver nunca, porque el puntero ya
 	// pasó de largo. Los que ya son hoja de vida se reconocen por su Message-ID y no se repiten.
+	var previas []modelos.HojaVidaCorreo
+	if err := leerJSON(a.rutaResultados(), &previas); err != nil {
+		return 0, 0, fmt.Errorf("resultados previos ilegibles: %w", err)
+	}
 	if !a.releido && a.UltimasEnPrimeraLectura > 0 && estado.UltimoUID > 0 {
 		rangoViejo := new(imap.SeqSet)
 		rangoViejo.AddRange(1, estado.UltimoUID)
@@ -169,19 +173,24 @@ func (a *AgenteCorreo) ProcesarNuevos(ctx context.Context) (revisados, guardados
 		if viejos, err := c.UidSearch(criterioViejo); err == nil {
 			sort.Slice(viejos, func(i, j int) bool { return viejos[i] < viejos[j] })
 			viejos = viejos[max(0, len(viejos)-a.UltimasEnPrimeraLectura):]
+			// Las hojas guardadas con texto de basura (PDF mal leído) se vuelven a leer sea cual sea su antigüedad.
+			rotas := 0
+			for _, p := range previas {
+				if textoIlegible(p.TextoCV) && p.UID != 0 && p.UID <= estado.UltimoUID && !slices.Contains(viejos, p.UID) {
+					viejos = append(viejos, p.UID)
+					rotas++
+				}
+			}
+			sort.Slice(viejos, func(i, j int) bool { return viejos[i] < viejos[j] })
 			nuevos = append(append([]uint32(nil), viejos...), nuevos...)
 			a.releido = true
-			fmt.Printf("[*] Buzón: se vuelven a revisar los últimos %d correos ya leídos\n", len(viejos))
+			fmt.Printf("[*] Buzón: se vuelven a revisar %d correos ya leídos (los últimos %d y %d con texto ilegible)\n", len(viejos), len(viejos)-rotas, rotas)
 		}
 	}
 	if len(nuevos) == 0 {
 		return 0, 0, nil
 	}
 
-	var previas []modelos.HojaVidaCorreo
-	if err := leerJSON(a.rutaResultados(), &previas); err != nil {
-		return 0, 0, fmt.Errorf("resultados previos ilegibles: %w", err)
-	}
 	conocidos := map[string]bool{}
 	for _, h := range previas {
 		if h.MessageID != "" {
@@ -322,9 +331,13 @@ func fusionarHoja(destino *modelos.HojaVidaCorreo, nueva modelos.HojaVidaCorreo)
 	if destino.Nombre == "" {
 		destino.Nombre = nueva.Nombre
 	}
-	if len(nueva.TextoCV) > len(destino.TextoCV) {
+	// Un texto de basura binaria (lectura fallida de un PDF) se reemplaza aunque el nuevo sea más corto.
+	if len(nueva.TextoCV) > len(destino.TextoCV) || (textoIlegible(destino.TextoCV) && !textoIlegible(nueva.TextoCV)) {
 		destino.TextoCV, destino.CuerpoCorreo = nueva.TextoCV, nueva.CuerpoCorreo
 		destino.TextoLeido, destino.ParecidoCV = nueva.TextoLeido, nueva.ParecidoCV
+		destino.LeidoConIA, destino.AdjuntosSinLeer = nueva.LeidoConIA, nueva.AdjuntosSinLeer
+		destino.MotivoConductor, destino.DecididoPorIA = nueva.MotivoConductor, nueva.DecididoPorIA
+		destino.InteresConductor = nueva.InteresConductor
 	}
 	if destino.HuellaAdjuntos == "" {
 		destino.HuellaAdjuntos = nueva.HuellaAdjuntos
@@ -638,6 +651,11 @@ func (a *AgenteCorreo) analizarCorreo(ctx context.Context, m correoCrudo) (model
 		} else {
 			h.MotivoConductor += " (la IA no pudo desempatar: " + err.Error() + ")"
 		}
+	}
+	// Si ningún adjunto se pudo leer no hay base para decir «no»: queda como dudoso para que alguien lo revise.
+	if h.InteresConductor == ConductorNo && len(h.AdjuntosSinLeer) > 0 && strings.TrimSpace(textoCV) == "" {
+		h.InteresConductor = ConductorDudoso
+		h.MotivoConductor = "No se pudo leer " + strings.Join(h.AdjuntosSinLeer, ", ") + ": no se puede descartar, revisar a mano"
 	}
 	return h, true
 }

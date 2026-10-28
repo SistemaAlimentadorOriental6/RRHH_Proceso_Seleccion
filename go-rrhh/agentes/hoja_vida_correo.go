@@ -206,11 +206,28 @@ func camposFormulario(cuerpo string) map[string]string {
 // sin estructura de hoja de vida ni datos de contacto. La extracción de respaldo de PDF devuelve
 // restos de código en lugar de nada, así que el tamaño solo no basta.
 func necesitaLecturaConIA(texto string) bool {
-	if len(strings.TrimSpace(texto)) < 80 {
+	if len(strings.TrimSpace(texto)) < 80 || textoIlegible(texto) {
 		return true
 	}
 	c := utilidades.ExtraerContacto(texto, "")
 	return !pareceHojaDeVida(texto) && c.Telefono == "" && c.Correo == "" && cedulaEnTexto(texto) == ""
+}
+
+// textoIlegible dice si lo que salió de un archivo es basura binaria y no texto: restos de la estructura de
+// un PDF («endstream», «endobj») o muchos caracteres de control o de reemplazo. Un solo dato suelto, como un
+// correo, no lo vuelve legible: ese texto basura traía un «mailto:» y pasaba por hoja de vida.
+func textoIlegible(texto string) bool {
+	if strings.Contains(texto, "endstream") || strings.Contains(texto, "endobj") {
+		return true
+	}
+	total, malos := 0, 0
+	for _, r := range texto {
+		total++
+		if r == unicode.ReplacementChar || (r < 0x20 && r != 0x0A && r != 0x0D && r != 0x09) {
+			malos++
+		}
+	}
+	return total > 0 && malos*20 > total // más del 5 %
 }
 
 // esDocumentoCV dice si un adjunto puede ser una hoja de vida por su extensión.

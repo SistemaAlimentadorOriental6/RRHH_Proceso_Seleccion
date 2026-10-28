@@ -4,11 +4,14 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/ledongthuc/pdf"
 )
 
 // ExtraerTextoPDF extrae el contenido textual de una hoja de vida en PDF.
@@ -48,26 +51,34 @@ except Exception as e:
 		}
 	}
 
-	// 2. Fallback de lectura directa de streams de texto
-	datos, err := os.ReadFile(rutaPDF)
-	if err != nil {
-		return "", err
-	}
-
-	reTexto := regexp.MustCompile(`\(([^\(\)\\]{3,})\)`)
-	matches := reTexto.FindAllStringSubmatch(string(datos), -1)
-	var lineas []string
-	for _, m := range matches {
-		if len(m) > 1 {
-			lineas = append(lineas, m[1])
-		}
-	}
-
-	if len(lineas) > 0 {
-		return limpiarTexto(strings.Join(lineas, " ")), nil
+	// 2. Respaldo en Go puro, para cuando no hay Python con PyMuPDF (p. ej. en el servidor). Antes aquí se
+	// buscaba texto entre paréntesis en los bytes del archivo y de un PDF comprimido salía basura binaria.
+	if texto, err := textoPDFNativo(rutaPDF); err == nil && len(strings.TrimSpace(texto)) > 20 {
+		return limpiarTexto(texto), nil
 	}
 
 	return "", fmt.Errorf("no fue posible extraer texto del PDF: %s", rutaPDF)
+}
+
+// textoPDFNativo lee el texto de un PDF sin programas externos. La librería puede entrar en pánico con
+// archivos dañados: se trata como error.
+func textoPDFNativo(rutaPDF string) (texto string, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			texto, err = "", fmt.Errorf("PDF ilegible: %v", r)
+		}
+	}()
+	f, lector, err := pdf.Open(rutaPDF)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	flujo, err := lector.GetPlainText()
+	if err != nil {
+		return "", err
+	}
+	datos, err := io.ReadAll(io.LimitReader(flujo, 2<<20))
+	return string(datos), err
 }
 
 func limpiarTexto(texto string) string {
