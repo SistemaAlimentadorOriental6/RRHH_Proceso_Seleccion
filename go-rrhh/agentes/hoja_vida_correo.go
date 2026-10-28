@@ -15,14 +15,17 @@ import (
 // Funciones puras (sin red) que deciden qué correos son hojas de vida y si la persona busca ser
 // conductor. Se mantienen aparte del cliente IMAP para poder probarlas con textos de ejemplo.
 
-var quitarTildes = transform.Chain(norm.NFD, runes.Remove(runes.In(unicode.Mn)), norm.NFC)
+// quitarTildes crea la cadena en cada uso: transform.Chain guarda estado y no admite llamadas concurrentes.
+func quitarTildes() transform.Transformer {
+	return transform.Chain(norm.NFD, runes.Remove(runes.In(unicode.Mn)), norm.NFC)
+}
 
 var reNoAlfanumerico = regexp.MustCompile(`[^a-z0-9]+`)
 
 // normalizarTexto pasa a minúsculas, quita tildes y deja solo letras, números y espacios simples:
 // "HOJA_DE_VIDA-Juan.pdf" → "hoja de vida juan pdf".
 func normalizarTexto(s string) string {
-	sin, _, err := transform.String(quitarTildes, strings.ToLower(s))
+	sin, _, err := transform.String(quitarTildes(),strings.ToLower(s))
 	if err != nil {
 		sin = strings.ToLower(s)
 	}

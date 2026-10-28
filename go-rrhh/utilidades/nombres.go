@@ -9,14 +9,17 @@ import (
 	"golang.org/x/text/unicode/norm"
 )
 
-var quitarAcentos = transform.Chain(norm.NFD, runes.Remove(runes.In(unicode.Mn)), norm.NFC)
+// quitarAcentos crea la cadena en cada uso: transform.Chain guarda estado y no admite llamadas concurrentes.
+func quitarAcentos() transform.Transformer {
+	return transform.Chain(norm.NFD, runes.Remove(runes.In(unicode.Mn)), norm.NFC)
+}
 
 // particulas son conectores de los nombres y apellidos que no ayudan a identificar a nadie.
 var particulas = map[string]struct{}{"de": {}, "del": {}, "la": {}, "las": {}, "los": {}, "y": {}, "e": {}}
 
 // TokensNombre separa un nombre en palabras en minúscula y sin acentos, sin conectores.
 func TokensNombre(nombre string) []string {
-	sinAcentos, _, _ := transform.String(quitarAcentos, nombre)
+	sinAcentos, _, _ := transform.String(quitarAcentos(), nombre)
 	palabras := strings.FieldsFunc(strings.ToLower(sinAcentos), func(r rune) bool {
 		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
 	})

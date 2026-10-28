@@ -74,7 +74,10 @@ func NuevoRepositorioDisco(directorioDescargas string) *RepositorioDisco {
 	return &RepositorioDisco{directorioDescargas: directorioDescargas}
 }
 
-var quitarAcentos = transform.Chain(norm.NFD, runes.Remove(runes.In(unicode.Mn)), norm.NFC)
+// quitarAcentos crea la cadena en cada uso: transform.Chain guarda estado y no admite llamadas concurrentes.
+func quitarAcentos() transform.Transformer {
+	return transform.Chain(norm.NFD, runes.Remove(runes.In(unicode.Mn)), norm.NFC)
+}
 
 var palabrasVacias = map[string]struct{}{
 	"de": {}, "del": {}, "la": {}, "las": {}, "el": {}, "los": {}, "y": {}, "en": {}, "para": {}, "a": {},
@@ -82,7 +85,7 @@ var palabrasVacias = map[string]struct{}{
 
 // tokens normaliza un texto a palabras en minúscula, sin acentos ni signos.
 func tokens(texto string) []string {
-	sinAcentos, _, _ := transform.String(quitarAcentos, texto)
+	sinAcentos, _, _ := transform.String(quitarAcentos(), texto)
 	return strings.FieldsFunc(strings.ToLower(sinAcentos), func(r rune) bool {
 		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
 	})
