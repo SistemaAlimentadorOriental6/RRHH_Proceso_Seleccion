@@ -308,13 +308,19 @@ func (c *ControladorRRHH) ManejarVacantesComputrabajo(w http.ResponseWriter, r *
 		w.Header().Set("X-Vacantes-Fuente", fuente)
 	}
 
-	// Cruce con lo procesado en local: por id de carpeta (el título limpio, como lo guarda el análisis)
-	// y, si no, por slug (si hay carpetas duplicadas gana la más reciente).
+	// Cruce con lo procesado: por el id de Computrabajo (con la base), luego por id de carpeta (el título
+	// limpio, como lo guarda el análisis) y, si no, por slug (si hay carpetas duplicadas gana la más reciente).
+	// Por título solo, dos vacantes con el mismo nombre mostraban los totales de la otra.
 	locales := map[string]ResumenOferta{}
 	porID := map[string]ResumenOferta{}
+	porClave := map[string]ResumenOferta{}
 	if lista, err := c.repositorio.ListarOfertas(); err == nil {
 		for _, o := range lista {
-			porID[o.ID] = o
+			if o.IDComputrabajo != "" && !strings.HasPrefix(o.IDComputrabajo, "carpeta:") {
+				porClave[o.IDComputrabajo] = o
+				continue
+			}
+			porID[o.ID] = o // importada de los JSON (o sin base): solo se conoce por el título
 			if previa, ok := locales[o.Slug]; !ok || o.ActualizadoEn.After(previa.ActualizadoEn) {
 				locales[o.Slug] = o
 			}
@@ -336,11 +342,14 @@ func (c *ControladorRRHH) ManejarVacantesComputrabajo(w http.ResponseWriter, r *
 		if o.ID == agentes.IDOfertaCorreo {
 			v.Origen = "correo"
 		}
-		local, ok := porID[agentes.LimpiarNombre(o.Titulo)]
+		local, ok := porClave[o.ID]
 		if !ok {
-			local, ok = locales[v.Slug]
+			if local, ok = porID[agentes.LimpiarNombre(o.Titulo)]; !ok {
+				local, ok = locales[v.Slug]
+			}
 		}
 		if ok && local.Error == "" {
+			v.Slug = local.Slug // el que distingue a las vacantes con el mismo título
 			v.Procesada = true
 			v.Resumen = &ResumenAnalizados{
 				Postulados: local.TotalCandidatos,

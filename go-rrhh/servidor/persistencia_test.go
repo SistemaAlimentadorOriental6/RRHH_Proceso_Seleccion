@@ -39,7 +39,7 @@ func (p *persistenciaFalsa) CandidatosPrevios(ctx context.Context, o modelos.Ofe
 	return p.previos, p.errPrevios
 }
 
-func (p *persistenciaFalsa) MarcarVigentes(ctx context.Context, o modelos.OfertaLaboral, urls []string) error {
+func (p *persistenciaFalsa) MarcarVigentes(ctx context.Context, o modelos.OfertaLaboral, urls, _ []string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.vigentesLlamo = true

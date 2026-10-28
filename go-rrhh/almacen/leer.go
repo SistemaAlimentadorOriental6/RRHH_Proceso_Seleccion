@@ -93,22 +93,35 @@ func (a *Almacen) CandidatosPrevios(ctx context.Context, oferta modelos.OfertaLa
 	return previos, nil
 }
 
-// MarcarVigentes deja vigentes solo a los postulantes cuya ficha aparece en urls y retira a los
-// demás de la vacante (su historial se conserva). Se llama al terminar un listado completo.
-func (a *Almacen) MarcarVigentes(ctx context.Context, oferta modelos.OfertaLaboral, urls []string) error {
+// MarcarVigentes deja vigentes a los postulantes cuya ficha aparece en urls y retira de la vacante a
+// los de retirados (su historial se conserva); a los demás no los toca. Se llama al terminar un
+// listado completo.
+func (a *Almacen) MarcarVigentes(ctx context.Context, oferta modelos.OfertaLaboral, urls, retirados []string) error {
+	if len(urls) == 0 && len(retirados) == 0 {
+		return nil
+	}
 	ofertaID, err := a.asegurarOferta(ctx, oferta)
 	if err != nil {
 		return err
 	}
-	consulta := `UPDATE postulaciones po JOIN perfiles pf ON pf.postulacion_id = po.id
-	                SET po.activa = COALESCE(pf.url_detalle IN (` + marcas(len(urls)) + `), 0)
-	              WHERE po.oferta_id = ? AND pf.url_detalle IS NOT NULL`
-	args := make([]any, 0, len(urls)+1)
-	for _, u := range urls {
-		args = append(args, u)
+	marcar := func(tx *sql.Tx, activa int, lista []string) error {
+		if len(lista) == 0 {
+			return nil
+		}
+		args := []any{activa, ofertaID}
+		for _, u := range lista {
+			args = append(args, u)
+		}
+		return exec(ctx, tx, `UPDATE postulaciones po JOIN perfiles pf ON pf.postulacion_id = po.id
+		                         SET po.activa = ?
+		                       WHERE po.oferta_id = ? AND pf.url_detalle IN (`+marcas(len(lista))+`)`, args...)
 	}
-	args = append(args, ofertaID)
-	return a.enTx(ctx, func(tx *sql.Tx) error { return exec(ctx, tx, consulta, args...) })
+	return a.enTx(ctx, func(tx *sql.Tx) error {
+		if err := marcar(tx, 1, urls); err != nil {
+			return err
+		}
+		return marcar(tx, 0, retirados)
+	})
 }
 
 // marcas devuelve n marcadores "?" separados por comas; con n = 0 devuelve NULL (nada coincide).
@@ -335,7 +348,8 @@ func (a *Almacen) armarCandidato(f filaCandidato) (modelos.Candidato, error) {
 			VerificacionPendiente: f.verifPendiente.Bool,
 		}
 		c.EvaluacionIdoneidad = ev
-		c.EsApto = ev.EsApto
+		// EsApto sale del dictamen (arriba), igual que los totales de OfertasProcesadas: si saliera de la
+		// evaluación, la lista y el contador de la vacante podrían no coincidir.
 		if c.Genero == "" {
 			c.Genero = ev.Genero
 		}

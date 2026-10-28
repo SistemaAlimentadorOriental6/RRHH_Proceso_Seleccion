@@ -45,3 +45,19 @@ func TestYaIncluido(t *testing.T) {
 		t.Error("un texto distinto no está incluido")
 	}
 }
+
+func TestAusentesConfirmados(t *testing.T) {
+	previos := map[string]*modelos.Candidato{"a": {}, "b": {}, "c": {}}
+	// Primer listado corto: falta "c", pero todavía no se retira.
+	if got := ausentesConfirmados("prueba-ausentes", previos, map[string]bool{"a": true, "b": true}); len(got) != 0 {
+		t.Fatalf("a la primera ausencia no se retira a nadie: %v", got)
+	}
+	// "c" reaparece y ahora falta "b": tampoco se retira (no faltó dos veces seguidas).
+	if got := ausentesConfirmados("prueba-ausentes", previos, map[string]bool{"a": true, "c": true}); len(got) != 0 {
+		t.Fatalf("una ausencia aislada no retira: %v", got)
+	}
+	// "b" falta otra vez: se retira.
+	if got := ausentesConfirmados("prueba-ausentes", previos, map[string]bool{"a": true, "c": true}); len(got) != 1 || got[0] != "b" {
+		t.Fatalf("retirados = %v; quería [b]", got)
+	}
+}

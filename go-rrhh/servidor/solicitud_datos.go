@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"go-rrhh/agentes"
+	"go-rrhh/modelos"
 	"go-rrhh/utilidades"
 )
 
@@ -79,7 +79,10 @@ func (c *ControladorRRHH) candidatoParaSolicitud(w http.ResponseWriter, r *http.
 	}
 	titulo, err := c.tituloDeOferta(r.Context(), id)
 	if err == nil {
-		cv, err = c.buscarCandidato(agentes.LimpiarNombre(titulo), r.PathValue("candidato"))
+		var lista []modelos.Candidato
+		if lista, err = c.candidatosDeVacante(id, titulo, true); err == nil {
+			cv, err = buscarEn(lista, r.PathValue("candidato"))
+		}
 	}
 	if err != nil {
 		if errors.Is(err, ErrNoEncontrado) || errors.Is(err, ErrParametro) {

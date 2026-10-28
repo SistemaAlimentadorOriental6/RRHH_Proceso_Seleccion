@@ -65,7 +65,7 @@ func (c *ControladorRRHH) candidatosGuardados(r *http.Request, id string) (strin
 			return "", nil, err
 		}
 	}
-	lista, err := c.repositorio.ObtenerCandidatosOferta(agentes.LimpiarNombre(titulo), "")
+	lista, err := c.candidatosDeVacante(id, titulo, true)
 	if errors.Is(err, ErrNoEncontrado) {
 		return titulo, nil, nil
 	}

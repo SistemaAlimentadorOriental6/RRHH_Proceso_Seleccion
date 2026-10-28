@@ -112,8 +112,16 @@ func TestIntegracionVacantesYVigentes(t *testing.T) {
 		t.Fatalf("OfertasProcesadas = %+v, %v", ofertas, err)
 	}
 
+	// Quien no aparece pero no está en retirados sigue vigente: un listado corto no retira a nadie.
+	if err := a.MarcarVigentes(ctx, oferta, []string{"https://x/otro"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if lista, _ := a.CandidatosDeOferta(ctx, "ABC123"); len(lista) != 1 {
+		t.Errorf("sin retirarlo debe seguir vigente: %d", len(lista))
+	}
+
 	// Cuando el postulante ya no aparece se retira de la vacante, pero se conserva para reutilizarlo.
-	if err := a.MarcarVigentes(ctx, oferta, []string{}); err != nil {
+	if err := a.MarcarVigentes(ctx, oferta, nil, []string{c.URLDetalle}); err != nil {
 		t.Fatal(err)
 	}
 	if lista, _ := a.CandidatosDeOferta(ctx, "ABC123"); len(lista) != 0 {
@@ -128,7 +136,7 @@ func TestIntegracionVacantesYVigentes(t *testing.T) {
 	}
 
 	// Si vuelve a aparecer queda vigente otra vez.
-	if err := a.MarcarVigentes(ctx, oferta, []string{c.URLDetalle, "https://x/otro"}); err != nil {
+	if err := a.MarcarVigentes(ctx, oferta, []string{c.URLDetalle, "https://x/otro"}, nil); err != nil {
 		t.Fatal(err)
 	}
 	if lista, _ := a.CandidatosDeOferta(ctx, "ABC123"); len(lista) != 1 {
@@ -136,7 +144,7 @@ func TestIntegracionVacantesYVigentes(t *testing.T) {
 	}
 
 	// Guardar de nuevo a un retirado lo reactiva.
-	_ = a.MarcarVigentes(ctx, oferta, []string{})
+	_ = a.MarcarVigentes(ctx, oferta, nil, []string{c.URLDetalle})
 	if err := a.GuardarCandidato(ctx, oferta, c); err != nil {
 		t.Fatal(err)
 	}

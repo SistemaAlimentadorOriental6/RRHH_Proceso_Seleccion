@@ -458,7 +458,7 @@ func (c *ControladorRRHH) ejecutarJobAnalisis(ctx context.Context, job *JobAnali
 
 	job.Emitir("job.iniciado", map[string]any{
 		"job_id":   job.ID,
-		"oferta":   map[string]any{"id": oferta.ID, "titulo": oferta.Titulo, "slug": SlugVacante(oferta.Titulo), "url_candidatos": oferta.URLCandidatos},
+		"oferta":   map[string]any{"id": oferta.ID, "titulo": oferta.Titulo, "slug": c.slugDe(oferta), "url_candidatos": oferta.URLCandidatos},
 		"opciones": opts,
 	})
 
@@ -542,6 +542,15 @@ func (c *ControladorRRHH) ejecutarJobAnalisis(ctx context.Context, job *JobAnali
 func (c *ControladorRRHH) avisarJob(job *JobAnalisis) {
 	e := job.estadoJob()
 	c.cambios.emitir("job", map[string]string{"id": e.ID, "oferta_id": e.OfertaID, "titulo": e.Titulo, "estado": e.Estado})
+}
+
+// slugDe es el slug con que la pantalla abre la vacante: el guardado en la base, que distingue a las que
+// comparten título, o el del título si todavía no tiene candidatos guardados.
+func (c *ControladorRRHH) slugDe(oferta modelos.OfertaLaboral) string {
+	if o, err := c.repositorio.ResolverOferta(oferta.ID); err == nil && o.IDComputrabajo == oferta.ID {
+		return o.Slug
+	}
+	return SlugVacante(oferta.Titulo)
 }
 
 // ManejarAnalizarVacante analiza los postulados de una vacante y transmite el avance por SSE.
@@ -771,6 +780,18 @@ func (c *ControladorRRHH) tituloDeOferta(ctx context.Context, id string) (string
 	return oferta.Titulo, nil
 }
 
+// candidatosDeVacante lee los candidatos guardados de una vacante por su id de Computrabajo (con la base
+// distingue a las que comparten título) o, si no, por la carpeta de su título (solo archivos o vacante
+// importada de los JSON). Antes se buscaba solo por título y, con dos vacantes del mismo nombre, salía
+// la de cambios más recientes: la pantalla saltaba de una a otra.
+func (c *ControladorRRHH) candidatosDeVacante(id, titulo string, conTexto bool) ([]modelos.Candidato, error) {
+	lista, err := c.candidatosOferta(id, "", conTexto)
+	if errors.Is(err, ErrNoEncontrado) || errors.Is(err, ErrParametro) {
+		return c.candidatosOferta(agentes.LimpiarNombre(titulo), "", conTexto)
+	}
+	return lista, err
+}
+
 // ManejarCandidatosGuardadosVacante devuelve los candidatos ya analizados de una vacante, buscada por
 // su id de Computrabajo. A diferencia de /api/vacantes/{slug}/candidatos no se confunde cuando dos
 // vacantes comparten slug ("Operador(a)…" y "Operador…").
@@ -792,7 +813,7 @@ func (c *ControladorRRHH) ManejarCandidatosGuardadosVacante(w http.ResponseWrite
 		return
 	}
 
-	candidatos, err := c.candidatosOferta(agentes.LimpiarNombre(titulo), "", false)
+	candidatos, err := c.candidatosDeVacante(id, titulo, false)
 	if err != nil {
 		if errors.Is(err, ErrNoEncontrado) {
 			log.Printf("[!] Sin candidatos guardados para la vacante %s (%q): %v", id, titulo, err)

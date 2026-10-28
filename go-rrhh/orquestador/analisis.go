@@ -2,6 +2,7 @@ package orquestador
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -430,7 +431,13 @@ func (a *Analizador) Analizar(ctx context.Context, oferta modelos.OfertaLaboral)
 	close(colaPrevios)
 	wg.Wait()
 
-	listadoCompleto := errListado == nil && ctx.Err() == nil
+	aMedias := errors.Is(errListado, agentes.ErrListadoIncompleto)
+	if aMedias {
+		// Lo leído ya se analizó; solo no sirve para saber quién se fue de la vacante.
+		fmt.Printf("[!] %s: el listado de postulados se leyó a medias; nadie se retira de la vacante esta vez\n", oferta.Titulo)
+		errListado = nil
+	}
+	listadoCompleto := errListado == nil && ctx.Err() == nil && !aMedias
 	if listadoCompleto && a.opts.Limite == 0 {
 		acum.conservarSoloVistos(vistos)
 		if a.persistencia != nil {
@@ -438,8 +445,9 @@ func (a *Analizador) Analizar(ctx context.Context, oferta modelos.OfertaLaboral)
 			for u := range vistos {
 				urls = append(urls, u)
 			}
+			retirados := ausentesConfirmados(oferta.ID, previos, vistos)
 			ctxBase, cancel := context.WithTimeout(context.Background(), plazoPersistencia)
-			if err := a.persistencia.MarcarVigentes(ctxBase, oferta, urls); err != nil {
+			if err := a.persistencia.MarcarVigentes(ctxBase, oferta, urls, retirados); err != nil {
 				fmt.Printf("[!] No se pudo actualizar en la base de datos quiénes siguen postulados: %v\n", err)
 			}
 			cancel()

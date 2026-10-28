@@ -2,10 +2,12 @@ package servidor
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -66,10 +68,34 @@ func NuevoRepositorioMySQL(disco *RepositorioDisco, base LectorBase, descargas s
 	return &RepositorioMySQL{RepositorioDisco: disco, base: base, descargas: descargas}
 }
 
-// ofertaLeida es una vacante con la clave con la que se buscan sus candidatos en la base.
+// ofertaLeida es una vacante con la clave con la que se buscan sus candidatos en la base. slugBase es
+// el slug sin distinguir, que guardan los enlaces de antes.
 type ofertaLeida struct {
 	ResumenOferta
-	clave string
+	clave, slugBase string
+}
+
+// distinguirRepetidas da slug e id propios a las vacantes que los comparten: Computrabajo repite el título
+// al publicar otra vez una oferta (o solo cambia mayúsculas), y antes la API mostraba una sola, la de
+// cambios más recientes, así que la pantalla saltaba de una a otra con otros totales. El sufijo sale de
+// la clave de la vacante, así que no cambia entre lecturas.
+func distinguirRepetidas(ofertas []ofertaLeida) {
+	slugs, ids := map[string]int{}, map[string]int{}
+	for _, o := range ofertas {
+		slugs[o.Slug]++
+		ids[strings.ToLower(o.ID)]++ // en Windows las carpetas no distinguen mayúsculas
+	}
+	for i := range ofertas {
+		o := &ofertas[i]
+		o.slugBase = o.Slug
+		sufijo := fmt.Sprintf("%x", sha256.Sum256([]byte(o.clave)))[:6]
+		if slugs[o.Slug] > 1 {
+			o.Slug += "-" + sufijo
+		}
+		if ids[strings.ToLower(o.ID)] > 1 {
+			o.ID += "_" + sufijo
+		}
+	}
 }
 
 // ofertas devuelve una copia de la lista de vacantes de la base, reutilizada por unos segundos.
@@ -102,6 +128,7 @@ func (r *RepositorioMySQL) leerOfertas() ([]ofertaLeida, error) {
 			clave: o.IDComputrabajo,
 			ResumenOferta: ResumenOferta{
 				ID:              id,
+				IDComputrabajo:  o.IDComputrabajo,
 				Slug:            o.Slug,
 				Titulo:          o.Titulo,
 				Carpeta:         filepath.Join(r.descargas, id),
@@ -114,7 +141,13 @@ func (r *RepositorioMySQL) leerOfertas() ([]ofertaLeida, error) {
 			},
 		})
 	}
-	sort.Slice(salida, func(i, j int) bool { return salida[i].Titulo < salida[j].Titulo })
+	distinguirRepetidas(salida)
+	sort.Slice(salida, func(i, j int) bool {
+		if salida[i].Titulo != salida[j].Titulo {
+			return salida[i].Titulo < salida[j].Titulo
+		}
+		return salida[i].clave < salida[j].clave
+	})
 	return salida, nil
 }
 
@@ -131,21 +164,21 @@ func (r *RepositorioMySQL) ListarOfertas() ([]ResumenOferta, error) {
 	return salida, nil
 }
 
-// ResolverOferta localiza una vacante por slug o por id. Si varias comparten slug gana la de datos
-// más recientes.
+// ResolverOferta localiza una vacante por slug, por id o por su id de Computrabajo. Un enlace viejo con
+// el slug que comparten varias vacantes lleva a la de datos más recientes.
 func (r *RepositorioMySQL) ResolverOferta(slugOID string) (*ResumenOferta, error) {
-	ofertas, err := r.ListarOfertas()
+	ofertas, err := r.ofertas()
 	if err != nil {
 		return nil, err
 	}
 	var elegida *ResumenOferta
 	for i := range ofertas {
 		o := &ofertas[i]
-		if o.ID == slugOID {
-			return o, nil
+		if o.ID == slugOID || o.Slug == slugOID || o.clave == slugOID {
+			return &o.ResumenOferta, nil
 		}
-		if o.Slug == slugOID && (elegida == nil || o.ActualizadoEn.After(elegida.ActualizadoEn)) {
-			elegida = o
+		if o.slugBase == slugOID && (elegida == nil || o.ActualizadoEn.After(elegida.ActualizadoEn)) {
+			elegida = &o.ResumenOferta
 		}
 	}
 	if elegida == nil {
@@ -182,9 +215,9 @@ func (r *RepositorioMySQL) candidatosOferta(idOferta string, filtro string, conT
 	}
 	var elegida *ofertaLeida
 	for i := range ofertas {
-		o := &ofertas[i]
-		if o.ID == idOferta && (elegida == nil || o.ActualizadoEn.After(elegida.ActualizadoEn)) {
-			elegida = o
+		if ofertas[i].ID == idOferta || ofertas[i].clave == idOferta {
+			elegida = &ofertas[i]
+			break
 		}
 	}
 	if elegida == nil {

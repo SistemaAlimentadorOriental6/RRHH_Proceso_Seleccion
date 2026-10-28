@@ -34,7 +34,9 @@ var (
 
 // ResumenOferta contiene información consolidada de una convocatoria laboral.
 type ResumenOferta struct {
-	ID              string `json:"id"`
+	ID string `json:"id"`
+	// IDComputrabajo es la clave de la vacante en la base (vacío en el modo de solo archivos).
+	IDComputrabajo  string `json:"id_computrabajo,omitempty"`
 	Slug            string `json:"slug"`
 	Titulo          string `json:"titulo"`
 	Carpeta         string `json:"carpeta"`

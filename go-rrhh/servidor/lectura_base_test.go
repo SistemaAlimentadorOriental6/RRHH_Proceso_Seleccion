@@ -141,6 +141,56 @@ func TestRepositorioBaseListaVacantesConLaFormaDeSiempre(t *testing.T) {
 	}
 }
 
+// Dos vacantes con el mismo título (Computrabajo la republicó) no se mezclan: cada una tiene slug e id
+// propios y fijos, aunque cambie cuál se actualizó de último. Antes la pantalla saltaba de una a otra.
+func TestRepositorioBaseDistingueVacantesConElMismoTitulo(t *testing.T) {
+	hoy := time.Now()
+	l := &lectorFalso{
+		ofertas: []almacen.OfertaProcesada{
+			{IDComputrabajo: "X1", Titulo: "Conductor de buses", Slug: "conductor-buses", Total: 9, Aptos: 9, ActualizadoEn: hoy},
+			{IDComputrabajo: "X2", Titulo: "Conductor de Buses", Slug: "conductor-buses", Total: 6, Aptos: 6, ActualizadoEn: hoy.Add(time.Minute)},
+		},
+		candidatos: map[string][]modelos.Candidato{
+			"X1": {{Nombre: "Uno", Cedula: "1111111", EsApto: true}},
+			"X2": {{Nombre: "Dos", Cedula: "2222222", EsApto: true}, {Nombre: "Tres", Cedula: "3333333", EsApto: true}},
+		},
+	}
+	r := repositorioConBase(t, l)
+	ofertas, err := r.ListarOfertas()
+	if err != nil || len(ofertas) != 2 {
+		t.Fatalf("ofertas = %+v, %v", ofertas, err)
+	}
+	if ofertas[0].Slug == ofertas[1].Slug || ofertas[0].ID == ofertas[1].ID {
+		t.Fatalf("slug e id deben ser distintos: %+v", ofertas)
+	}
+	slugs := map[string]string{}
+	for _, o := range ofertas {
+		slugs[o.IDComputrabajo] = o.Slug
+		got, err := r.ResolverOferta(o.Slug)
+		if err != nil || got.IDComputrabajo != o.IDComputrabajo {
+			t.Errorf("ResolverOferta(%q) = %+v, %v", o.Slug, got, err)
+		}
+		lista, err := r.ObtenerCandidatosOferta(o.ID, "aptos")
+		if err != nil || len(lista) != len(l.candidatos[o.IDComputrabajo]) {
+			t.Errorf("candidatos de %s: %d, %v", o.IDComputrabajo, len(lista), err)
+		}
+	}
+
+	// Que la otra se actualice no cambia los slugs.
+	l.ofertas[0].ActualizadoEn = hoy.Add(time.Hour)
+	time.Sleep(vigenciaOfertasBase)
+	otra, _ := r.ListarOfertas()
+	for _, o := range otra {
+		if slugs[o.IDComputrabajo] != o.Slug {
+			t.Errorf("el slug de %s cambió: %q → %q", o.IDComputrabajo, slugs[o.IDComputrabajo], o.Slug)
+		}
+	}
+	// Un enlace viejo con el slug compartido sigue abriendo una de ellas.
+	if _, err := r.ResolverOferta("conductor-buses"); err != nil {
+		t.Errorf("slug compartido: %v", err)
+	}
+}
+
 func TestRepositorioBaseResuelveVacantePorSlugOId(t *testing.T) {
 	r := repositorioConBase(t, lectorConDosVacantes())
 	for _, clave := range []string{"operador-buses-metro", "Operador(a)_de_buses_-_Metro"} {

@@ -259,7 +259,7 @@ func (c *ControladorRRHH) reintentarPendientes(ctx context.Context) {
 		if o.ID != agentes.IDOfertaCorreo && c.estaExcluida(o.Titulo) {
 			continue
 		}
-		lista, err := c.repositorio.ObtenerCandidatosOferta(agentes.LimpiarNombre(o.Titulo), "")
+		lista, err := c.candidatosDeVacante(o.ID, o.Titulo, false)
 		if err != nil || !hayPendientesTecnicos(lista) {
 			continue
 		}

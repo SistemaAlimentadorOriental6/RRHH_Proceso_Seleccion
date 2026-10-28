@@ -44,6 +44,10 @@ var (
 // ErrSesionExpirada indica que Computrabajo redirigió al login: hay que autenticar de nuevo.
 var ErrSesionExpirada = errors.New("la sesión de Computrabajo expiró; vuelva a autenticar")
 
+// ErrListadoIncompleto avisa que el listado de postulados se leyó a medias (una página falló o no salió
+// nadie): lo leído sirve, pero no prueba que los que faltan se hayan ido de la vacante.
+var ErrListadoIncompleto = errors.New("el listado de postulados quedó incompleto")
+
 // AgenteComputrabajo gestiona la autenticacion, extraccion de ofertas, candidatos y descarga de PDFs.
 type AgenteComputrabajo struct {
 	cfg *configuracion.Configuracion
@@ -308,7 +312,7 @@ func (a *AgenteComputrabajo) ContarCandidatosOferta(ctx context.Context, urlCand
 	if err := chromedp.Run(ctxTimeout, bloquearRecursosPesados()); err != nil {
 		return 0, err
 	}
-	candidatos, err := a.obtenerCandidatos(ctx, ctxTimeout, urlCandidatos, 0, false, nil)
+	candidatos, _, err := a.obtenerCandidatos(ctx, ctxTimeout, urlCandidatos, 0, false, nil)
 	if err != nil {
 		return 0, err
 	}
@@ -332,7 +336,10 @@ func (a *AgenteComputrabajo) ObtenerCandidatosStream(ctx context.Context, urlCan
 	if err := chromedp.Run(ctxTimeout, bloquearRecursosPesados()); err != nil {
 		return err
 	}
-	_, err := a.obtenerCandidatos(ctx, ctxTimeout, urlCandidatos, limite, false, alDescubrir)
+	_, incompleto, err := a.obtenerCandidatos(ctx, ctxTimeout, urlCandidatos, limite, false, alDescubrir)
+	if err == nil && incompleto {
+		return ErrListadoIncompleto
+	}
 	return err
 }
 
@@ -447,13 +454,15 @@ func normalizarURLPagina(raw string) string {
 // ObtenerCandidatosDeOferta extrae TODOS los candidatos inscritos en una oferta, recorriendo scroll y paginación.
 // El orden y el índice de los candidatos son deterministas (orden de descubrimiento en la plataforma).
 func (a *AgenteComputrabajo) ObtenerCandidatosDeOferta(ctx context.Context, urlCandidatos string, limite int) ([]*modelos.Candidato, error) {
-	return a.obtenerCandidatos(ctx, a.sesion(), urlCandidatos, limite, true, nil)
+	lista, _, err := a.obtenerCandidatos(ctx, a.sesion(), urlCandidatos, limite, true, nil)
+	return lista, err
 }
 
 // obtenerCandidatos recorre el listado de una oferta en la pestaña ses. verbose imprime avance por consola.
 // Si alDescubrir no es nil, cada candidato nuevo se entrega en cuanto aparece (también mientras se
 // hace scroll) y se respeta limite al entregarlos; el resultado devuelto sigue siendo la lista completa.
-func (a *AgenteComputrabajo) obtenerCandidatos(ctx context.Context, ses context.Context, urlCandidatos string, limite int, verbose bool, alDescubrir func(*modelos.Candidato)) ([]*modelos.Candidato, error) {
+// incompleto es verdadero si alguna página no se pudo leer o no apareció nadie.
+func (a *AgenteComputrabajo) obtenerCandidatos(ctx context.Context, ses context.Context, urlCandidatos string, limite int, verbose bool, alDescubrir func(*modelos.Candidato)) (_ []*modelos.Candidato, incompleto bool, _ error) {
 	if verbose {
 		fmt.Printf("[*] Navegando a la oferta para extraer todos los candidatos inscritos: %s\n", urlCandidatos)
 	}
@@ -503,7 +512,7 @@ func (a *AgenteComputrabajo) obtenerCandidatos(ctx context.Context, ses context.
 
 	for len(cola) > 0 && paginas < maxPaginasOferta {
 		if ctx.Err() != nil {
-			return nil, ctx.Err()
+			return nil, true, ctx.Err()
 		}
 		if limite > 0 && len(orden) >= limite {
 			break
@@ -539,9 +548,10 @@ func (a *AgenteComputrabajo) obtenerCandidatos(ctx context.Context, ses context.
 		})
 		if err != nil {
 			if paginas == 1 {
-				return nil, err // la página principal es obligatoria
+				return nil, true, err // la página principal es obligatoria
 			}
 			fmt.Printf("[!] No se pudo leer la página %s: %v\n", paginaURL, err)
+			incompleto = true
 			continue
 		}
 
@@ -570,7 +580,7 @@ func (a *AgenteComputrabajo) obtenerCandidatos(ctx context.Context, ses context.
 	if verbose {
 		fmt.Printf("[+] Total candidatos extraídos de la oferta: %d (%d páginas)\n", len(resultado), paginas)
 	}
-	return resultado, nil
+	return resultado, incompleto || len(orden) == 0, nil
 }
 
 // cargarTodasLasFilas hace scroll y pulsa "cargar más" hasta que el número de filas deja de crecer
