@@ -239,6 +239,20 @@ func esDocumentoCV(nombre string) bool {
 	return false
 }
 
+// minBytesImagenCV: por debajo de esto una imagen es un logo o un ícono de la firma del correo, no una hoja de vida.
+const minBytesImagenCV = 30 << 10
+
+var reDocumentoSoporte = regexp.MustCompile(`\b(cedula|cc|licencia|pase|certificad\w*|seguridad social|eps|pension|pasado judicial|antecedentes|rut|libreta|diploma|acta|contrato|soporte|documentos?|anexos?|scan\w*|foto|selfie|logo|firma|carnet)\b`)
+
+// esDocumentoDeSoporte dice, por el nombre, si un adjunto acompaña a la hoja de vida (cédula, licencia,
+// certificados, foto…) en lugar de serlo. Un nombre que dice «hoja de vida» siempre es la hoja de vida.
+func esDocumentoDeSoporte(nombre string) bool {
+	if _, ok := mencionaHojaDeVida(nombre); ok {
+		return false
+	}
+	return reDocumentoSoporte.MatchString(normalizarTexto(strings.TrimSuffix(nombre, filepath.Ext(nombre))))
+}
+
 // esDocumentoWordOPDF dice si un adjunto es un PDF o un documento de Word: con uno de esos el correo
 // se toma como hoja de vida sin importar el asunto.
 func esDocumentoWordOPDF(nombre string) bool {

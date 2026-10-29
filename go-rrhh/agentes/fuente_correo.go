@@ -112,8 +112,8 @@ func (a *AgenteCorreo) ExtraerDetalleCandidato(_ context.Context, c *modelos.Can
 		}
 		c.Cedula = h.Cedula
 		c.TextoPerfil = fmt.Sprintf("Correo: %s\nTeléfono: %s\n%s", h.Correo, h.Telefono, h.TextoCV)
-		for _, ruta := range h.Archivos {
-			if ext := strings.ToLower(filepath.Ext(ruta)); ext == ".pdf" || ext == ".docx" {
+		for _, ruta := range h.Archivos { // la cédula o la licencia no son la hoja de vida
+			if ext := strings.ToLower(filepath.Ext(ruta)); (ext == ".pdf" || ext == ".docx") && !esDocumentoDeSoporte(filepath.Base(ruta)) {
 				c.RutaCVOriginal = ruta
 				break
 			}

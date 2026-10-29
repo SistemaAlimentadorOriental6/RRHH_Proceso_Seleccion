@@ -243,7 +243,9 @@ func (a *AgenteCorreo) ProcesarNuevos(ctx context.Context) (revisados, guardados
 			if conocidos[h.MessageID] || (h.HuellaAdjuntos != "" && conocidos["huella:"+h.HuellaAdjuntos]) {
 				yaGuardados++
 				// Al releer, si ahora se pudo leer más (p. ej. el PDF que venía como enlace) se completa su hoja.
-				if i := slices.IndexFunc(previas, func(p modelos.HojaVidaCorreo) bool { return p.MessageID == h.MessageID }); i >= 0 {
+				if i := slices.IndexFunc(previas, func(p modelos.HojaVidaCorreo) bool {
+					return p.MessageID == h.MessageID || (h.HuellaAdjuntos != "" && p.HuellaAdjuntos == h.HuellaAdjuntos)
+				}); i >= 0 {
 					fusionarHoja(&previas[i], h)
 				}
 				continue
@@ -331,8 +333,11 @@ func fusionarHoja(destino *modelos.HojaVidaCorreo, nueva modelos.HojaVidaCorreo)
 	if destino.Nombre == "" {
 		destino.Nombre = nueva.Nombre
 	}
-	// Un texto de basura binaria (lectura fallida de un PDF) se reemplaza aunque el nuevo sea más corto.
-	if len(nueva.TextoCV) > len(destino.TextoCV) || (textoIlegible(destino.TextoCV) && !textoIlegible(nueva.TextoCV)) {
+	// Un texto de basura binaria (lectura fallida de un PDF) se reemplaza aunque el nuevo sea más corto. Lo mismo
+	// el que la IA transcribió de escaneos (cédula, licencia) mezclados con la hoja de vida: si ahora se lee una
+	// hoja de vida legible sin IA, es el texto limpio.
+	limpiaLecturaConIA := destino.LeidoConIA && !nueva.LeidoConIA && nueva.ParecidoCV && !textoIlegible(nueva.TextoCV)
+	if len(nueva.TextoCV) > len(destino.TextoCV) || (textoIlegible(destino.TextoCV) && !textoIlegible(nueva.TextoCV)) || limpiaLecturaConIA {
 		destino.TextoCV, destino.CuerpoCorreo = nueva.TextoCV, nueva.CuerpoCorreo
 		destino.TextoLeido, destino.ParecidoCV = nueva.TextoLeido, nueva.ParecidoCV
 		destino.LeidoConIA, destino.AdjuntosSinLeer = nueva.LeidoConIA, nueva.AdjuntosSinLeer
@@ -543,8 +548,13 @@ func (a *AgenteCorreo) analizarCorreo(ctx context.Context, m correoCrudo) (model
 	textoCV := ""
 	huella := sha256.New()
 	hashEscrito := false
-	var porLeerConIA []adjuntoLeido
-	var rutasPorLeerConIA []string
+	// Quien se postula manda más que su hoja de vida (cédula, licencia, certificados): se lee todo, pero solo
+	// la hoja de vida alimenta TextoCV; los soportes aportan la cédula y la licencia, nada más.
+	type documentoLeido struct {
+		adjuntoLeido
+		texto string
+	}
+	var documentos []documentoLeido
 	for _, ad := range adjuntos {
 		if !esDocumentoCV(ad.nombre) {
 			continue
@@ -557,41 +567,62 @@ func (a *AgenteCorreo) analizarCorreo(ctx context.Context, m correoCrudo) (model
 			continue
 		}
 		h.Archivos = append(h.Archivos, ruta)
-		texto := textoDeAdjunto(ruta, ad)
-		if strings.EqualFold(filepath.Ext(ad.nombre), ".pdf") && necesitaLecturaConIA(texto) {
-			porLeerConIA = append(porLeerConIA, ad) // PDF escaneado: no trae texto
-			rutasPorLeerConIA = append(rutasPorLeerConIA, ad.nombre)
-			continue
-		}
-		textoCV += "\n" + texto
+		documentos = append(documentos, documentoLeido{ad, textoDeAdjunto(ruta, ad)})
 	}
 	if hashEscrito {
 		h.HuellaAdjuntos = fmt.Sprintf("%x", huella.Sum(nil))[:16]
 	}
-	for _, ad := range adjuntos {
-		if esImagen(ad.nombre) && (motivo != "" || len(porLeerConIA) > 0 || hayDocumento) {
-			if ruta, err := guardarAdjunto(carpeta, ad); err == nil {
-				h.Archivos = append(h.Archivos, ruta)
+	hayCV := slices.ContainsFunc(documentos, func(d documentoLeido) bool {
+		return !esDocumentoDeSoporte(d.nombre) && pareceHojaDeVida(d.texto)
+	})
+	var textoSoporte string
+	var porLeerConIA []adjuntoLeido
+	for _, d := range documentos {
+		switch {
+		case esDocumentoDeSoporte(d.nombre) || (hayCV && !pareceHojaDeVida(d.texto)):
+			// Un escaneo de cédula no se manda a la IA: es un dato personal que no hace falta transcribir.
+			if !textoIlegible(d.texto) {
+				textoSoporte += "\n" + d.texto
 			}
-			porLeerConIA = append(porLeerConIA, ad)
-			rutasPorLeerConIA = append(rutasPorLeerConIA, ad.nombre)
+			fmt.Printf("[auto] Buzón: correo %d: %q se toma como documento de soporte, no como hoja de vida\n", m.uid, d.nombre)
+		case strings.EqualFold(filepath.Ext(d.nombre), ".pdf") && necesitaLecturaConIA(d.texto):
+			porLeerConIA = append(porLeerConIA, d.adjuntoLeido) // PDF escaneado: no trae texto
+		default:
+			textoCV += "\n" + d.texto
 		}
 	}
 	// Escaneos y fotos: se transcriben con IA si hay; si no, quedan anotados como sin leer.
-	for i, ad := range porLeerConIA {
-		if a.ia != nil && a.ia.Disponible() {
-			if texto, err := a.ia.transcribirArchivo(ctx, ad.nombre, ad.datos); err == nil && strings.TrimSpace(texto) != "" {
-				textoCV += "\n" + texto
-				h.LeidoConIA = true
-				continue
-			} else if err != nil {
-				fmt.Printf("[!] La IA no pudo leer %q: %v\n", ad.nombre, err)
+	leerConIA := func(lista []adjuntoLeido) {
+		for _, ad := range lista {
+			if a.ia != nil && a.ia.Disponible() {
+				if texto, err := a.ia.transcribirArchivo(ctx, ad.nombre, ad.datos); err == nil && strings.TrimSpace(texto) != "" {
+					textoCV += "\n" + texto
+					h.LeidoConIA = true
+					continue
+				} else if err != nil {
+					fmt.Printf("[!] La IA no pudo leer %q: %v\n", ad.nombre, err)
+				}
+			}
+			h.AdjuntosSinLeer = append(h.AdjuntosSinLeer, ad.nombre)
+		}
+	}
+	leerConIA(porLeerConIA)
+	// Las imágenes (la foto de la persona, logos de la firma, cédula fotografiada) solo se leen cuando no hay
+	// otra hoja de vida de la que sacar texto: la hoja de vida fotografiada.
+	if strings.TrimSpace(textoCV) == "" && (motivo != "" || hayDocumento) {
+		var fotos []adjuntoLeido
+		for _, ad := range adjuntos {
+			if esImagen(ad.nombre) && len(ad.datos) >= minBytesImagenCV && !esDocumentoDeSoporte(ad.nombre) {
+				if ruta, err := guardarAdjunto(carpeta, ad); err == nil {
+					h.Archivos = append(h.Archivos, ruta)
+				}
+				fotos = append(fotos, ad)
 			}
 		}
-		h.AdjuntosSinLeer = append(h.AdjuntosSinLeer, rutasPorLeerConIA[i])
+		leerConIA(fotos)
 	}
 
-	todo := h.Asunto + "\n" + cuerpo + "\n" + textoCV
+	todo := h.Asunto + "\n" + cuerpo + "\n" + textoCV + "\n" + textoSoporte
 	h.CuerpoCorreo = strings.TrimSpace(cuerpo)[:min(len(strings.TrimSpace(cuerpo)), 2000)]
 	h.TextoCV = acotarTexto(strings.TrimSpace(cuerpo+"\n"+textoCV), 20000)
 	h.TextoLeido = strings.TrimSpace(textoCV) != "" || len(strings.TrimSpace(cuerpo)) > 200
@@ -644,7 +675,7 @@ func (a *AgenteCorreo) analizarCorreo(ctx context.Context, m correoCrudo) (model
 		h.Correo = h.Remitente
 	}
 
-	h.InteresConductor, h.MotivoConductor = EvaluarInteresConductor(h.Asunto, cuerpo, textoCV)
+	h.InteresConductor, h.MotivoConductor = EvaluarInteresConductor(h.Asunto, cuerpo, textoCV+"\n"+textoSoporte)
 	if h.InteresConductor == ConductorDudoso && a.ia != nil && a.ia.Disponible() && h.TextoLeido {
 		if v, mot, err := a.desempatarConIA(ctx, h.Asunto, cuerpo, textoCV); err == nil {
 			h.InteresConductor, h.MotivoConductor, h.DecididoPorIA = v, mot, true
@@ -674,7 +705,7 @@ func textoDeAdjunto(ruta string, ad adjuntoLeido) string {
 	case ".txt", ".rtf":
 		texto = string(ad.datos)
 	}
-	if err != nil {
+	if err != nil && !esDocumentoDeSoporte(ad.nombre) { // el escaneo de una cédula sin texto es lo esperado
 		fmt.Printf("[!] No se pudo leer el texto de %q: %v\n", ad.nombre, err)
 	}
 	return texto
