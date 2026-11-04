@@ -10,6 +10,9 @@
   import {
     GRUPOS_NAVEGACION_SIDEBAR,
     RUTA_BASE_DESCARTADOS,
+    RUTA_BASE_SEMILLERO,
+    RUTA_BASE_PENDIENTES,
+    RUTA_BASE_PARAMETROS,
     RUTA_BASE_RECLUTAMIENTO_VACANTES,
     RUTA_BASE_VALIDACION_CANDIDATOS,
     type MigaDePan,
@@ -33,6 +36,7 @@
     buscarCandidatoReclutamientoEnVacante,
     buscarVacanteReclutamientoPorSlug,
   } from "./dominios/reclutamiento/modelos/modelosReclutamiento";
+  import VistaParametrosAceptacion from "./dominios/configuracion/vistas/VistaParametrosAceptacion.svelte";
   import VistaDescartados from "./dominios/candidatos/vistas/VistaDescartados.svelte";
   import VistaVacantesReclutamiento from "./dominios/reclutamiento/vistas/VistaVacantesReclutamiento.svelte";
   import VistaDetalleVacanteReclutamiento from "./dominios/reclutamiento/vistas/VistaDetalleVacanteReclutamiento.svelte";
@@ -50,7 +54,7 @@
   let totalEventosLog = $state<number>(0);
   let estadoMotor = $state<string>("Motor Orquestador Listo");
 
-  type ModuloDashboardActivo = "candidatos_validacion" | "reclutamiento" | "descartados";
+  type ModuloDashboardActivo = "candidatos_validacion" | "reclutamiento" | "descartados" | "semillero" | "pendientes" | "parametros";
 
   /**
    * Analiza la URL actual y extrae el módulo activo y los slugs jerárquicos:
@@ -75,10 +79,23 @@
       };
     }
 
-    if (limpia === RUTA_BASE_DESCARTADOS) {
+    if (limpia === RUTA_BASE_PARAMETROS) {
       return {
         esDashboard: true,
-        modulo: "descartados" as ModuloDashboardActivo,
+        modulo: "parametros" as ModuloDashboardActivo,
+        slugVacante: null,
+        slugCandidato: null,
+      };
+    }
+
+    if (limpia === RUTA_BASE_DESCARTADOS || limpia === RUTA_BASE_SEMILLERO || limpia === RUTA_BASE_PENDIENTES) {
+      return {
+        esDashboard: true,
+        modulo: (limpia === RUTA_BASE_SEMILLERO
+          ? "semillero"
+          : limpia === RUTA_BASE_PENDIENTES
+            ? "pendientes"
+            : "descartados") as ModuloDashboardActivo,
         slugVacante: null,
         slugCandidato: null,
       };
@@ -255,11 +272,24 @@
       return migasReclutamiento;
     }
 
-    if (estadoRutaSegmentada.modulo === "descartados") {
+    if (estadoRutaSegmentada.modulo === "parametros") {
+      return [
+        { etiqueta: "Dashboard", ruta: RUTA_BASE_VALIDACION_CANDIDATOS },
+        { etiqueta: "Configuración", ruta: RUTA_BASE_PARAMETROS },
+        { etiqueta: "Parámetros", ruta: RUTA_BASE_PARAMETROS },
+      ];
+    }
+
+    if (["descartados", "semillero", "pendientes"].includes(estadoRutaSegmentada.modulo)) {
+      const modulo = estadoRutaSegmentada.modulo;
       return [
         { etiqueta: "Dashboard", ruta: RUTA_BASE_VALIDACION_CANDIDATOS },
         { etiqueta: "Candidatos", ruta: RUTA_BASE_VALIDACION_CANDIDATOS },
-        { etiqueta: "Descartados", ruta: RUTA_BASE_DESCARTADOS },
+        modulo === "semillero"
+          ? { etiqueta: "Semillero", ruta: RUTA_BASE_SEMILLERO }
+          : modulo === "pendientes"
+            ? { etiqueta: "Pendientes", ruta: RUTA_BASE_PENDIENTES }
+            : { etiqueta: "Descartados", ruta: RUTA_BASE_DESCARTADOS },
       ];
     }
 
@@ -478,8 +508,11 @@
                 )}
             />
           {/if}
-        {:else if estadoRutaSegmentada.modulo === "descartados"}
+        {:else if estadoRutaSegmentada.modulo === "parametros"}
+          <VistaParametrosAceptacion />
+        {:else if estadoRutaSegmentada.modulo === "descartados" || estadoRutaSegmentada.modulo === "semillero" || estadoRutaSegmentada.modulo === "pendientes"}
           <VistaDescartados
+            tipo={estadoRutaSegmentada.modulo}
             alAbrirFlujoCandidato={(idVac, slugCand) =>
               navegarHacia(
                 `${RUTA_BASE_VALIDACION_CANDIDATOS}/${idVac}/${slugCand}`,

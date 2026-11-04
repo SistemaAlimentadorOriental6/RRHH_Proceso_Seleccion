@@ -56,6 +56,30 @@ func (a *AgenteRunt) NormalizarApellido(primerApellido string) string {
 	return strings.TrimSpace(apellido)
 }
 
+// particulasApellido son los conectores que forman apellidos compuestos (DE LA HOZ, DEL RIO, SAN MARTIN).
+var particulasApellido = map[string]bool{"de": true, "del": true, "la": true, "las": true, "los": true, "san": true, "santa": true}
+
+// apellidosCompuestos devuelve los apellidos que empiezan con conectores, completos: de
+// ["JOEL","DAVID","DE","LA","HOZ","GUZMAN"] saca ["DE LA HOZ"].
+func apellidosCompuestos(palabras []string) []string {
+	var res []string
+	for i := 0; i < len(palabras); i++ {
+		if !particulasApellido[strings.ToLower(palabras[i])] {
+			continue
+		}
+		j := i
+		for j < len(palabras) && particulasApellido[strings.ToLower(palabras[j])] {
+			j++
+		}
+		if j == len(palabras) {
+			break // solo conectores al final: no hay apellido
+		}
+		res = append(res, strings.Join(palabras[i:j+1], " "))
+		i = j
+	}
+	return res
+}
+
 // DeducirApellidos extrae los candidatos más probables a primer apellido.
 func (a *AgenteRunt) DeducirApellidos(nombreCompleto string, apellidosRef string) []string {
 	var lista []string
@@ -79,6 +103,13 @@ func (a *AgenteRunt) DeducirApellidos(nombreCompleto string, apellidosRef string
 		}
 		if strings.Contains(strings.ToLower(ap), "montan") {
 			agregar("MONTAÑA")
+		}
+	}
+
+	// 0. Apellidos compuestos ("DE LA HOZ"): el RUNT pide el apellido entero, no su última palabra.
+	for _, fuente := range []string{apellidosRef, nombreCompleto} {
+		for _, compuesto := range apellidosCompuestos(strings.Fields(fuente)) {
+			agregarConVariantes(compuesto)
 		}
 	}
 

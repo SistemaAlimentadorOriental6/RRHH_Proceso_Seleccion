@@ -25,9 +25,10 @@ export const RUTA_BASE_VALIDACION_CANDIDATOS =
 export const RUTA_BASE_RECLUTAMIENTO_VACANTES =
   '/dashboard/reclutamiento/vacantes';
 
-// Semillero y Descartados todavía no tienen pantalla propia: por ahora solo existe la entrada del menú.
 export const RUTA_BASE_SEMILLERO = '/dashboard/semillero';
 export const RUTA_BASE_DESCARTADOS = '/dashboard/descartados';
+export const RUTA_BASE_PENDIENTES = '/dashboard/pendientes';
+export const RUTA_BASE_PARAMETROS = '/dashboard/configuracion/parametros';
 
 export const GRUPOS_NAVEGACION_SIDEBAR: GrupoNavegacion[] = [
   {
@@ -53,12 +54,35 @@ export const GRUPOS_NAVEGACION_SIDEBAR: GrupoNavegacion[] = [
         icono: 'flujo'
       },
       {
+        id: 'pendientes',
+        etiqueta: 'Pendientes',
+        ruta: RUTA_BASE_PENDIENTES,
+        seccion: 'Candidatos',
+        descripcion: 'Candidatos con verificación pendiente (faltan datos o no se pudo verificar)',
+        icono: 'flujo'
+      },
+      {
         id: 'descartados',
         etiqueta: 'Descartados',
         ruta: RUTA_BASE_DESCARTADOS,
         seccion: 'Candidatos',
         descripcion: 'Candidatos descartados',
         icono: 'flujo'
+      }
+    ]
+  },
+  {
+    id: 'configuracion',
+    titulo: 'Configuración',
+    icono: 'configuracion',
+    subItems: [
+      {
+        id: 'parametros',
+        etiqueta: 'Parámetros',
+        ruta: RUTA_BASE_PARAMETROS,
+        seccion: 'Configuración',
+        descripcion: 'Parámetros de aceptación de hojas de vida',
+        icono: 'configuracion'
       }
     ]
   }

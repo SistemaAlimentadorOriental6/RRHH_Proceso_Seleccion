@@ -25,7 +25,8 @@
     Call02Icon,
     Notification03Icon,
     WhatsappIcon,
-    Download01Icon
+    Download01Icon,
+    Leaf01Icon
   } from '@hugeicons/core-free-icons';
   import type {
     DatosCandidatoEscenario,
@@ -116,6 +117,8 @@
         return 'Aprobado';
       case 'detenido_error':
         return modoEnVivo ? 'No cumple' : 'Detenido';
+      case 'semillero':
+        return 'Semillero';
       case 'omitido':
         return 'Omitido';
       default:
@@ -146,6 +149,7 @@
       class="puerto-vuesax puerto-entrada"
       class:puerto-activo={nodo.estado === 'completado' || nodo.estado === 'ejecutando' || nodo.estado === 'reintentando'}
       class:puerto-error={nodo.estado === 'detenido_error'}
+      class:puerto-semillero={nodo.estado === 'semillero'}
       aria-hidden="true"
     ></div>
   {:else}
@@ -159,6 +163,7 @@
       class:puerto-activo={nodo.estado === 'completado'}
       class:puerto-reintento={nodo.estado === 'reintentando' || nodo.estado === 'ejecutando'}
       class:puerto-error={nodo.estado === 'detenido_error'}
+      class:puerto-semillero={nodo.estado === 'semillero'}
       aria-hidden="true"
     ></div>
   {/if}
@@ -183,6 +188,8 @@
         <HugeiconsIcon icon={CheckmarkCircle02Icon} size={11} strokeWidth={2.3} />
       {:else if nodo.estado === 'detenido_error'}
         <HugeiconsIcon icon={Cancel01Icon} size={11} strokeWidth={2.3} />
+      {:else if nodo.estado === 'semillero'}
+        <HugeiconsIcon icon={Leaf01Icon} size={11} strokeWidth={2.3} />
       {:else}
         <HugeiconsIcon icon={Clock01Icon} size={11} strokeWidth={2} />
       {/if}
@@ -241,6 +248,7 @@
             class="valor-ficha-nodo"
             class:valor-ok={nodo.estado === 'completado'}
             class:valor-err={nodo.estado === 'detenido_error'}
+            class:valor-semillero={nodo.estado === 'semillero'}
           >
             {obtenerEtiquetaEstado(nodo.estado)}
           </strong>
@@ -276,8 +284,9 @@
           class="valor-campo"
           class:valor-ok={nodo.estado === 'completado'}
           class:valor-err={nodo.estado === 'detenido_error'}
+          class:valor-semillero={nodo.estado === 'semillero'}
         >
-          {#if nodo.estado === 'detenido_error'}
+          {#if nodo.estado === 'detenido_error' || nodo.estado === 'semillero'}
             {campo.valorError}
           {:else if nodo.estado === 'completado'}
             {campo.valorExito}
@@ -465,6 +474,15 @@
     z-index: 29;
   }
 
+  /* Semillero: no cumple la regla, pero la persona sigue en el proceso (azul) */
+  .tarjeta-nodo-vuesax.estado-semillero {
+    --anillo: 0 0 0 3px rgba(59, 130, 246, 0.5);
+    box-shadow:
+      var(--anillo),
+      0 0 0 10px rgba(59, 130, 246, 0.08),
+      0 20px 40px -8px rgba(59, 130, 246, 0.3);
+  }
+
   .tarjeta-nodo-vuesax.estado-omitido {
     opacity: 0.45;
   }
@@ -527,6 +545,13 @@
       0 0 12px rgba(239, 68, 68, 0.6);
   }
 
+  .puerto-vuesax.puerto-semillero {
+    background-color: #3b82f6;
+    box-shadow:
+      0 0 0 3px rgba(59, 130, 246, 0.3),
+      0 0 12px rgba(59, 130, 246, 0.6);
+  }
+
   .fila-superior {
     display: flex;
     align-items: center;
@@ -586,6 +611,11 @@
   .pildora-detenido_error {
     background-color: rgba(239, 68, 68, 0.12);
     color: #ef4444;
+  }
+
+  .pildora-semillero {
+    background-color: rgba(59, 130, 246, 0.12);
+    color: #2563eb;
   }
 
   .giro-suave {
@@ -670,6 +700,11 @@
     color: #ef4444;
   }
 
+  .icono-semillero {
+    background-color: rgba(59, 130, 246, 0.12);
+    color: #2563eb;
+  }
+
   .textos-nodo {
     display: flex;
     flex-direction: column;
@@ -731,6 +766,11 @@
 
   .valor-campo.valor-err {
     color: #ef4444;
+  }
+
+  .valor-campo.valor-semillero,
+  .valor-ficha-nodo.valor-semillero {
+    color: #2563eb;
   }
 
   /* Ficha del candidato en el nodo #1 */

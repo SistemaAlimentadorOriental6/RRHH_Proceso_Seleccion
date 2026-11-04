@@ -4,7 +4,7 @@
   import { fade, fly, slide } from "svelte/transition";
   import { cubicInOut, cubicOut } from "svelte/easing";
   import { SvelteSet } from "svelte/reactivity";
-  import { despachados, destinoDescartados, llevarTarjeta } from "../servicios/descarteAnimado.svelte";
+  import { despachados, destinoDescartados, destinoMenu, llevarTarjeta } from "../servicios/descarteAnimado.svelte";
   import { HugeiconsIcon } from "@hugeicons/svelte";
   import {
     Briefcase01Icon,
@@ -14,6 +14,7 @@
     WorkflowSquare10Icon,
     CheckmarkCircle02Icon,
     Cancel01Icon,
+    Leaf01Icon,
     Alert02Icon,
     ChevronRightIcon,
     File02Icon,
@@ -135,6 +136,7 @@
     recien: 0.2,
     en_cola: 0.5,
     apto: 1,
+    semillero: 1.5,
     pendiente: 2,
     no_apto: 3,
   };
@@ -164,8 +166,8 @@
   }
 
   // Quien termina en vivo se queda un momento en "Por verificar" y Adi se lo lleva, sin prisa y de a
-  // uno: a Descartados si fue rechazado, a su lugar en Analizados si no. Los que ya estaban rechazados
-  // al abrir la pantalla simplemente no aparecen aquí (están en Descartados).
+  // uno: a Descartados si fue rechazado, a Semillero si quedó para semillero y a su lugar en Analizados si
+  // no. Los que ya estaban rechazados o en semillero al abrir la pantalla no aparecen aquí (tienen su página).
   // (la lista `despachados` vive en descarteAnimado: sobrevive a salir y volver a esta pantalla)
   /** Más allá de esto una tarjeta terminada ya no se lleva con animación: se acomoda directamente. */
   const MAX_ANTIGUEDAD_LLEVAR_MS = 20_000;
@@ -190,13 +192,24 @@
       programados.delete(slug);
       return;
     }
-    const descartar = veredictoDe(c) === "no_apto";
+    const veredicto = veredictoDe(c);
+    const descartar = veredicto === "no_apto" || veredicto === "semillero" || veredicto === "pendiente"; // se van de esta página
     const resultado = llevarTarjeta(
       tarjeta,
-      descartar ? "descartar" : "analizar",
-      descartar
+      veredicto === "no_apto"
+        ? "descartar"
+        : veredicto === "semillero"
+          ? "semillero"
+          : veredicto === "pendiente"
+            ? "pendiente"
+            : "analizar",
+      veredicto === "no_apto"
         ? destinoDescartados
-        : () => document.querySelector<HTMLElement>(`.grilla-candidatos [data-slug="${CSS.escape(slug)}"]`),
+        : veredicto === "semillero"
+          ? () => destinoMenu("semillero")
+          : veredicto === "pendiente"
+            ? () => destinoMenu("pendientes")
+            : () => document.querySelector<HTMLElement>(`.grilla-candidatos [data-slug="${CSS.escape(slug)}"]`),
       () => enCamino.delete(slug),
     );
     if (resultado === "ocupado") {
@@ -208,8 +221,15 @@
     programados.delete(slug);
   }
 
+  /** Un descartado que se reanaliza desde Descartados: se ve (y Adi lo mueve) allá, no aquí. */
+  const deReanalisis = (c: CandidatoEnVivo) => almacenRrhh.reanalisis.has(c.resultado?.postulacion_id ?? "");
+
   $effect(() => {
     for (const c of sesionActiva?.candidatos ?? []) {
+      if (deReanalisis(c)) {
+        despachados.add(c.slug); // al terminar no se trae aquí con animación: llega directo a su lugar
+        continue;
+      }
       if (!esperaTurno(c) || programados.has(c.slug)) continue;
       if (Date.now() - (c.terminadoEn as number) > MAX_ANTIGUEDAD_LLEVAR_MS) {
         despachados.add(c.slug); // terminó hace rato (p. ej. mientras estaba en otra pantalla)
@@ -220,7 +240,12 @@
       setTimeout(() => llevar(c.slug), espera);
     }
   });
-  const sigueEnReclutamiento = (c: CandidatoEnVivo) => veredictoDe(c) !== "no_apto" || esperaTurno(c);
+  // Descartados y semilleros tienen su propia página: aquí solo se ven mientras Adi se los lleva.
+  const sigueEnReclutamiento = (c: CandidatoEnVivo) => {
+    if (deReanalisis(c)) return false;
+    const veredicto = veredictoDe(c);
+    return (veredicto !== "no_apto" && veredicto !== "semillero" && veredicto !== "pendiente") || esperaTurno(c);
+  };
 
   const candidatosVisibles = $derived.by((): CandidatoEnVivo[] => {
     if (!sesionActiva) return [];
@@ -269,7 +294,7 @@
     }
     if (veredicto === "apto") {
       return {
-        texto: "Cumple perfil, género, EPS activa, RUNT y SIMIT al día.",
+        texto: "Reclutado P1: cumple todas las reglas de los parámetros de aceptación.",
         tipo: "apto",
       };
     }
@@ -305,12 +330,13 @@
     const completos = sesion.candidatos.filter((c) => c.fase === "completo");
     if (completos.length === 0 && vacante.resumen) {
       const r = vacante.resumen;
-      return { postulados: r.postulados, aceptados: r.aptos, rechazados: r.no_aptos, pendientes: r.pendientes };
+      return { postulados: r.postulados, aceptados: r.aptos, semilleros: r.semilleros ?? 0, rechazados: r.no_aptos, pendientes: r.pendientes };
     }
     const veredictos = completos.map(veredictoDe);
     return {
       postulados: veredictos.length,
       aceptados: veredictos.filter((v) => v === "apto").length,
+      semilleros: veredictos.filter((v) => v === "semillero").length,
       rechazados: veredictos.filter((v) => v === "no_apto").length,
       pendientes: veredictos.filter((v) => v === "pendiente").length,
     };
@@ -707,14 +733,17 @@
           <div class="resumen-vacante">
             <div class="fila-cifras">
               <div class="cifra"><strong>{r.postulados}</strong><span>Postulados</span></div>
-              <div class="cifra cifra-ok"><strong>{r.aceptados}</strong><span>Aceptados · Aptos</span></div>
+              <div class="cifra cifra-ok"><strong>{r.aceptados}</strong><span>Reclutados P1</span></div>
+              {#if r.semilleros > 0}
+                <div class="cifra cifra-semillero"><strong>{r.semilleros}</strong><span>Semillero</span></div>
+              {/if}
               <button
                 type="button"
                 class="cifra cifra-mal cifra-enlace"
                 disabled={!alVerDescartados}
                 title="Los rechazados están en Descartados"
                 onclick={() => alVerDescartados?.()}
-              ><strong>{r.rechazados}</strong><span>Descartados · No aptos</span></button>
+              ><strong>{r.rechazados}</strong><span>Descartados</span></button>
               {#if r.pendientes > 0}
                 <div class="cifra cifra-aviso"><strong>{r.pendientes}</strong><span>Verificación pendiente</span></div>
               {/if}
@@ -756,9 +785,12 @@
                     sesion.resumen.descubiertos,
                   )} revisados</span
                 >
-                <span class="c-apto">{sesion.resumen.aptos} aptos</span>
+                <span class="c-apto">{sesion.resumen.aptos} reclutados P1</span>
+                {#if sesion.resumen.semilleros}
+                  <span class="c-semillero">{sesion.resumen.semilleros} semilleros</span>
+                {/if}
                 <span class="c-no-apto"
-                  >{sesion.resumen.no_aptos - sesion.resumen.pendientes} no aptos</span
+                  >{sesion.resumen.no_aptos - sesion.resumen.pendientes - (sesion.resumen.semilleros ?? 0)} descartados</span
                 >
                 {#if sesion.resumen.pendientes > 0}
                   <span class="c-pendiente"
@@ -824,6 +856,12 @@
                           size={12}
                           strokeWidth={2.3}
                         />
+                      {:else if veredicto === "semillero"}
+                        <HugeiconsIcon
+                          icon={Leaf01Icon}
+                          size={12}
+                          strokeWidth={2.3}
+                        />
                       {:else if veredicto === "pendiente"}
                         <HugeiconsIcon
                           icon={Alert02Icon}
@@ -838,6 +876,13 @@
                     <div class="chips-meta-persona">
                       {#if candidato.desdeCache}
                         <span class="etiqueta-meta">Guardado</span>
+                      {/if}
+                      {#if candidato.resultado?.evaluacion_idoneidad?.regla_version}
+                        <span
+                          class="etiqueta-meta"
+                          title="Evaluado con la versión {candidato.resultado.evaluacion_idoneidad.regla_version} de los parámetros de aceptación"
+                          >Reglas v{candidato.resultado.evaluacion_idoneidad.regla_version}</span
+                        >
                       {/if}
                       {#if candidato.urlDetalle.startsWith("correo:")}
                         <span
@@ -1572,6 +1617,10 @@
     color: #d14343;
   }
 
+  .cifra-semillero strong {
+    color: #2563eb;
+  }
+
   .cifra-aviso strong {
     color: #c27a0a;
   }
@@ -1717,6 +1766,10 @@
 
   .c-no-apto {
     color: #d14343;
+  }
+
+  .c-semillero {
+    color: #2563eb;
   }
 
   .c-pendiente {
@@ -1965,7 +2018,9 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 8px;
+    flex-wrap: wrap; /* con tantos chips, el veredicto queda arriba y los demás bajan en vez de salirse de la tarjeta */
+    gap: 6px 8px;
+    min-width: 0;
   }
 
   .selector-orden {
@@ -1988,11 +2043,15 @@
   .chips-meta-persona {
     display: inline-flex;
     align-items: center;
+    flex-wrap: wrap;
+    justify-content: flex-end;
     gap: 6px;
+    min-width: 0;
   }
 
   .etiqueta-meta,
   .etiqueta-orden {
+    white-space: nowrap; /* cada chip entero en una línea: si no cabe, baja completo */
     padding: 3px 8px;
     border-radius: 999px;
     background: #ffffff;
@@ -2046,6 +2105,7 @@
   }
 
   .pildora {
+    white-space: nowrap;
     display: inline-flex;
     align-items: center;
     gap: 5px;
@@ -2065,6 +2125,11 @@
   .veredicto-no_apto {
     background: rgba(239, 68, 68, 0.1);
     color: #d14343;
+  }
+
+  .veredicto-semillero {
+    background: rgba(59, 130, 246, 0.12);
+    color: #2563eb;
   }
 
   .veredicto-pendiente {
@@ -2112,6 +2177,10 @@
     color: #d14343;
   }
 
+  .etapa-semillero .nombre-etapa {
+    color: #2563eb;
+  }
+
   .punto {
     width: 100%;
     height: 6px;
@@ -2129,6 +2198,10 @@
 
   .punto-rechazado {
     background: #ef4444;
+  }
+
+  .punto-semillero {
+    background: #3b82f6;
   }
 
   .punto-error {

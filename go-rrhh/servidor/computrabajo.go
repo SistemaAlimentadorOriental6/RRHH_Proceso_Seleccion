@@ -56,8 +56,9 @@ type VacanteComputrabajo struct {
 type ResumenAnalizados struct {
 	Postulados int `json:"postulados"`
 	Aptos      int `json:"aptos"`
-	NoAptos    int `json:"no_aptos"` // sin contar los pendientes
+	NoAptos    int `json:"no_aptos"` // descartados: sin contar los pendientes ni los semilleros
 	Pendientes int `json:"pendientes"`
+	Semilleros int `json:"semilleros"`
 }
 
 // fuenteComputrabajo devuelve el agente de Computrabajo, creándolo la primera vez. Debe llamarse
@@ -354,8 +355,9 @@ func (c *ControladorRRHH) ManejarVacantesComputrabajo(w http.ResponseWriter, r *
 			v.Resumen = &ResumenAnalizados{
 				Postulados: local.TotalCandidatos,
 				Aptos:      local.TotalAptos,
-				NoAptos:    max(local.TotalNoAptos-local.TotalPendientes, 0),
+				NoAptos:    max(local.TotalNoAptos-local.TotalPendientes-local.TotalSemilleros, 0),
 				Pendientes: local.TotalPendientes,
+				Semilleros: local.TotalSemilleros,
 			}
 		}
 		vacantes = append(vacantes, v)

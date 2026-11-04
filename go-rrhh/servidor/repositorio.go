@@ -44,7 +44,9 @@ type ResumenOferta struct {
 	TotalAptos      int    `json:"total_aptos"`
 	TotalNoAptos    int    `json:"total_no_aptos"`
 	// TotalPendientes son los no aptos con verificación pendiente (una fuente no respondió, falta un dato).
-	TotalPendientes int       `json:"total_pendientes"`
+	TotalPendientes int `json:"total_pendientes"`
+	// TotalSemilleros son los no aptos clasificados como semillero (no cumplen alguna regla, pero no se descartan).
+	TotalSemilleros int       `json:"total_semilleros"`
 	TieneRankingIA  bool      `json:"tiene_ranking_ia"`
 	ActualizadoEn   time.Time `json:"actualizado_en"`
 	// Error se informa cuando el candidatos.json de la oferta existe pero está dañado, en lugar
@@ -130,7 +132,8 @@ func (r *RepositorioDisco) carpetaOferta(id string) (string, error) {
 type registroLigero struct {
 	EsApto     bool `json:"es_apto"`
 	Evaluacion *struct {
-		VerificacionPendiente bool `json:"verificacion_pendiente"`
+		VerificacionPendiente bool   `json:"verificacion_pendiente"`
+		Clasificacion         string `json:"clasificacion"`
 	} `json:"evaluacion_idoneidad"`
 }
 
@@ -175,6 +178,8 @@ func (r *RepositorioDisco) ListarOfertas() ([]ResumenOferta, error) {
 					oferta.TotalAptos++
 				} else if c.Evaluacion != nil && c.Evaluacion.VerificacionPendiente {
 					oferta.TotalPendientes++
+				} else if c.Evaluacion != nil && c.Evaluacion.Clasificacion == modelos.ClasificacionSemillero {
+					oferta.TotalSemilleros++
 				}
 			}
 			oferta.TotalCandidatos = len(lista)

@@ -8,7 +8,9 @@ import (
 
 func TestMotivoSinCache(t *testing.T) {
 	conCapturas := map[string]string{"adres": "a.jpg"}
-	evCompleta := &modelos.EvaluacionIdoneidad{}
+	evCompleta := &modelos.EvaluacionIdoneidad{EsApto: true}
+	noApto := &modelos.EvaluacionIdoneidad{}
+	pendiente := &modelos.EvaluacionIdoneidad{VerificacionPendiente: true}
 	descarte := &modelos.EvaluacionIdoneidad{DescarteTemprano: true}
 
 	casos := []struct {
@@ -25,6 +27,11 @@ func TestMotivoSinCache(t *testing.T) {
 		// Estos eran los que se rehacían en cada reinicio: descartados por una regla firme, sin consultas.
 		{"descartado por género sin cédula ni capturas", OpcionesAnalisis{}, modelos.Candidato{Cedula: "No especificada", EvaluacionIdoneidad: descarte}, false},
 		{"descartado temprano si se pide completo", OpcionesAnalisis{Completo: true}, modelos.Candidato{Cedula: "No especificada", EvaluacionIdoneidad: descarte}, true},
+		// Descartado tras consultar las fuentes pero sin capturas ni cédula guardadas: no se rehace solo.
+		{"descartado firme sin capturas", OpcionesAnalisis{}, modelos.Candidato{Cedula: "1037000111", EvaluacionIdoneidad: noApto}, false},
+		{"descartado firme sin cédula", OpcionesAnalisis{}, modelos.Candidato{Cedula: "No especificada", Capturas: conCapturas, EvaluacionIdoneidad: noApto}, false},
+		{"verificación pendiente sin capturas sí se rehace", OpcionesAnalisis{}, modelos.Candidato{Cedula: "1037000111", EvaluacionIdoneidad: pendiente}, true},
+		{"forzar rehace al descartado", OpcionesAnalisis{Forzar: true}, modelos.Candidato{Cedula: "1037000111", Capturas: conCapturas, EvaluacionIdoneidad: noApto}, true},
 		{"en pausa por datos", OpcionesAnalisis{}, modelos.Candidato{EstadoProceso: modelos.EstadoEsperandoDatos, Cedula: "No especificada", EvaluacionIdoneidad: evCompleta}, false},
 		{"forzar", OpcionesAnalisis{Forzar: true}, modelos.Candidato{Cedula: "1037000111", Capturas: conCapturas, EvaluacionIdoneidad: evCompleta}, true},
 	}

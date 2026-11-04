@@ -352,6 +352,9 @@ func (a *AgenteAdres) consultarUnaVez(ctx context.Context, cedulaLimpia string, 
 	return a.parsearResultado(textoResultado, cedulaLimpia), nil
 }
 
+// EstadoAdresNoAfiliado: ADRES respondió que la persona no figura en la BDUA (no tiene EPS).
+const EstadoAdresNoAfiliado = "NO_AFILIADO"
+
 // adresRespuestaValida indica si el texto contiene datos de afiliación o un aviso explícito de que
 // la persona no figura en la BDUA.
 func adresRespuestaValida(texto string) bool {
@@ -359,13 +362,18 @@ func adresRespuestaValida(texto string) bool {
 	if strings.Contains(mayus, "ENTIDAD") && (strings.Contains(mayus, "ACTIVO") || strings.Contains(mayus, "ESTADO")) {
 		return true
 	}
+	return adresNoEncontrado(texto) || len(strings.TrimSpace(texto)) >= 200
+}
+
+// adresNoEncontrado indica si ADRES dice expresamente que la persona no figura en la BDUA.
+func adresNoEncontrado(texto string) bool {
 	bajas := strings.ToLower(texto)
 	for _, frase := range []string{"no se encuentra", "no existe", "no registra", "no se encontr", "sin información"} {
 		if strings.Contains(bajas, frase) {
 			return true
 		}
 	}
-	return len(strings.TrimSpace(texto)) >= 200
+	return false
 }
 
 func (a *AgenteAdres) parsearResultado(texto string, cedula string) *modelos.ResultadoAdres {
@@ -438,14 +446,23 @@ func (a *AgenteAdres) parsearResultado(texto string, cedula string) *modelos.Res
 		}
 	}
 
-	epsUpper := strings.ToUpper(entidadEPS)
-	esAutorizada := false
-	for _, aut := range a.cfg.EPSAutorizadas {
-		if strings.Contains(epsUpper, strings.ToUpper(aut)) {
-			esAutorizada = true
-			break
+	// Sin fila de afiliación: o la persona no figura en la BDUA (eso sí es un resultado) o el portal cambió y no
+	// se pudo leer (no lo es: se reintenta en vez de rechazarla por "EPS no autorizada").
+	if entidadEPS == "NO REPORTADA" {
+		r := &modelos.ResultadoAdres{Estado: "ERROR_LECTURA", Documento: cedula, Nombres: nombres, Apellidos: apellidos,
+			Detalles: "No se encontró la tabla de afiliación en la respuesta de ADRES"}
+		if adresNoEncontrado(texto) {
+			r.Estado, r.Alerta, r.Detalles = EstadoAdresNoAfiliado, true, "No figura afiliado a ninguna EPS en la BDUA de ADRES"
 		}
+		return r
 	}
+
+	// La decisión que vale es la del clasificador, con las reglas de cada persona; esta solo queda de respaldo.
+	var autorizadas []string
+	if a.cfg != nil {
+		autorizadas = a.cfg.EPSAutorizadas
+	}
+	esAutorizada := EPSAceptada(entidadEPS, autorizadas)
 	esActivo := strings.Contains(strings.ToUpper(estadoAfiliacion), "ACTIVO")
 
 	var estado string
@@ -456,12 +473,12 @@ func (a *AgenteAdres) parsearResultado(texto string, cedula string) *modelos.Res
 		estado = "AFILIADO_VALIDO"
 		cumpleEPS = true
 		alerta = false
-		detalles = fmt.Sprintf("Cumple con EPS autorizada: %s (Estado: %s, Régimen: %s)", entidadEPS, estadoAfiliacion, regimen)
+		detalles = fmt.Sprintf("Afiliado a %s (Estado: %s, Régimen: %s)", entidadEPS, estadoAfiliacion, regimen)
 	} else if !esAutorizada && esActivo {
 		estado = "EPS_NO_AUTORIZADA"
 		cumpleEPS = false
 		alerta = true
-		detalles = fmt.Sprintf("EPS no autorizada (%s). Solo se admiten: Sura, Nueva EPS, Savia Salud o Sanitas.", entidadEPS)
+		detalles = fmt.Sprintf("Afiliado a %s (Estado: %s, Régimen: %s)", entidadEPS, estadoAfiliacion, regimen)
 	} else if !esActivo {
 		estado = "AFILIACION_INACTIVA"
 		cumpleEPS = false

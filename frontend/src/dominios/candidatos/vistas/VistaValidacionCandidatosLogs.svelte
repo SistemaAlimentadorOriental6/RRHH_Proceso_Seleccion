@@ -400,6 +400,8 @@
       const y2 = destino.posicionY + Y_PUERTO;
 
       let estadoConexion: EstadoConexion = 'inactiva';
+      // Semillero no corta el flujo: la persona sigue con las demás validaciones.
+      const paso = (e: string) => e === 'completado' || e === 'semillero';
 
       if (!tomada) {
         estadoConexion = 'inactiva';
@@ -409,13 +411,13 @@
       } else if (origen.estado === 'detenido_error' || destino.estado === 'omitido') {
         estadoConexion = 'cortada';
       } else if (
-        origen.estado === 'completado' &&
+        paso(origen.estado) &&
         (destino.estado === 'ejecutando' || destino.estado === 'reintentando')
       ) {
         estadoConexion = destino.estado === 'reintentando' ? 'reintentando' : 'fluyendo';
-      } else if (origen.estado === 'completado' && destino.estado === 'completado') {
+      } else if (paso(origen.estado) && paso(destino.estado)) {
         estadoConexion = 'completada';
-      } else if (origen.estado === 'completado') {
+      } else if (paso(origen.estado)) {
         estadoConexion = 'fluyendo';
       }
 

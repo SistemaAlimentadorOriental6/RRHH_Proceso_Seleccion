@@ -56,12 +56,11 @@ func (a *Analizador) ConEvaluadorIA(e EvaluadorIA) *Analizador {
 	return a
 }
 
-// evaluarConIA es la última etapa del flujo, solo para aptos sin errores de consulta: la IA califica la
-// hoja de vida. Si falla, el candidato sigue apto y sin puntaje; el siguiente análisis lo reintenta.
-// Devuelve true si dejó una calificación nueva en el candidato.
+// evaluarConIA es la última etapa del flujo, para reclutados P1 y semilleros sin errores de consulta: la IA
+// califica la hoja de vida. Si falla, el candidato sigue igual y sin puntaje; el siguiente análisis lo
+// reintenta. Devuelve true si dejó una calificación nueva en el candidato.
 func (a *Analizador) evaluarConIA(ctx context.Context, c *modelos.Candidato) bool {
-	if a.ia == nil || c.EvaluacionIA != nil || c.ErrorProceso != "" ||
-		c.EvaluacionIdoneidad == nil || !c.EvaluacionIdoneidad.EsApto {
+	if a.ia == nil || c.EvaluacionIA != nil || c.ErrorProceso != "" || !calificableConIA(c.EvaluacionIdoneidad) {
 		return false
 	}
 	a.etapa(c, "ia", estadoIniciada, "", 0)
@@ -75,12 +74,18 @@ func (a *Analizador) evaluarConIA(ctx context.Context, c *modelos.Candidato) boo
 		return false
 	}
 	if err != nil {
+		fmt.Printf("[!] La IA no pudo calificar a %s: %v\n", c.Nombre, err)
 		a.etapa(c, "ia", estadoError, "La IA no pudo calificar: "+err.Error(), time.Since(t0))
 		return false
 	}
 	c.EvaluacionIA = ev
 	a.etapa(c, "ia", estadoOK, fmt.Sprintf("Score %d/100 · %s", ev.ScoreTotal, ev.Dictamen), time.Since(t0))
 	return true
+}
+
+// calificableConIA: la IA califica a quien sigue en el proceso, sea reclutado P1 o semillero.
+func calificableConIA(ev *modelos.EvaluacionIdoneidad) bool {
+	return ev != nil && !ev.VerificacionPendiente && (ev.EsApto || ev.Clasificacion == modelos.ClasificacionSemillero)
 }
 
 // guardarIA guarda la calificación en la base de datos (el candidato ya debe estar guardado).

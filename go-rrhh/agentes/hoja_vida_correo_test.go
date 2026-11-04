@@ -102,6 +102,10 @@ func TestCedulaSinEtiqueta(t *testing.T) {
 		{"el celular no es cédula", "Datos personales 3145515276", ""},
 		{"salario no es cédula", "Aspiración salarial $1.300.000.000", ""},
 		{"nada", "Experiencia en ventas", ""},
+		{"suelto junto al correo", "Contacto \n3503962344 \nJimenezcarodaniel2003@gmail.com \n \n1001138626 \ninformación \n- Disponibilidad total.", "1001138626"},
+		{"suelto de 8 dígitos", "Contacto 3503962344 correo a@b.co 71234567 Medellín", "71234567"},
+		{"dos candidatos: no adivina", "Contacto 3503962344 1001138626 y 1002223334", ""},
+		{"el número de un correo no cuenta", "pepe12345678@gmail.com", ""},
 	}
 	for _, c := range casos {
 		if got := cedulaSinEtiqueta(c.texto); got != c.quiero {

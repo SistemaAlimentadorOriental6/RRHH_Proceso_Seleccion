@@ -153,6 +153,10 @@ func (a *Analizador) Reanudar(ctx context.Context, oferta modelos.OfertaLaboral,
 		return errors.New("el candidato no tiene cédula: no hay nada que reanudar")
 	}
 	a.oferta = oferta
+	// Estaba en pausa sin dictamen: se evalúa con las reglas vigentes al reanudar.
+	if err := a.fijarReglas(ctx, c, 0); err != nil {
+		return err
+	}
 
 	carpetaOferta := filepath.Join(a.cfg.DirectorioDescargas, agentes.LimpiarNombre(oferta.Titulo))
 	c.CarpetaCandidato = carpetaDe(c, carpetaOferta)
@@ -161,8 +165,13 @@ func (a *Analizador) Reanudar(ctx context.Context, oferta modelos.OfertaLaboral,
 	c.EstadoProceso, c.ErrorProceso, c.IntentosCedula = "", "", nil
 	c.Genero, _ = a.determinarGenero(ctx, c)
 
-	// El resultado se guarda en la base; no hay candidatos.json de la vacante que reescribir.
-	a.continuarDesdeCedula(ctx, c, carpetaOferta, &acumuladorResultados{}, true)
+	// El resultado se guarda en la base; no hay candidatos.json de la vacante que reescribir. Un descartado al
+	// que se le da una segunda oportunidad puede no tener un género aceptado: se revisa como en procesar.
+	if !c.Reglas.AceptaGenero(c.Genero) {
+		a.descartar(c, carpetaOferta, &acumuladorResultados{}, nil, agentes.MotivoGenero(c.Genero, c.Reglas))
+	} else {
+		a.continuarDesdeCedula(ctx, c, carpetaOferta, &acumuladorResultados{}, true)
+	}
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}

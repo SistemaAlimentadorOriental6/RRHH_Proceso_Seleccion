@@ -7,6 +7,7 @@
     WorkflowSquare10Icon,
     File02Icon,
     Download01Icon,
+    Leaf01Icon,
   } from "@hugeicons/core-free-icons";
   import {
     ETIQUETA_ETAPA,
@@ -15,6 +16,7 @@
   } from "../modelos/analisisEnVivo";
   import { ETIQUETA_VEREDICTO, veredictoDe } from "../servicios/almacenAnalisis.svelte";
   import { urlCaptura } from "../servicios/clienteRrhh";
+  import TarjetaReglasAplicadas from "../../configuracion/componentes/TarjetaReglasAplicadas.svelte";
 
   interface Propiedades {
     candidato: CandidatoEnVivo | undefined;
@@ -98,6 +100,8 @@
             <HugeiconsIcon icon={CheckmarkCircle02Icon} size={13} strokeWidth={2.3} />
           {:else if veredicto === "no_apto"}
             <HugeiconsIcon icon={Cancel01Icon} size={13} strokeWidth={2.3} />
+          {:else if veredicto === "semillero"}
+            <HugeiconsIcon icon={Leaf01Icon} size={13} strokeWidth={2.3} />
           {:else if veredicto === "pendiente"}
             <HugeiconsIcon icon={Alert02Icon} size={13} strokeWidth={2.3} />
           {:else if veredicto === "analizando"}
@@ -105,6 +109,11 @@
           {/if}
           {ETIQUETA_VEREDICTO[veredicto]}
         </span>
+        {#if r?.evaluacion_idoneidad?.regla_version}
+          <span class="pildora" title="Versión de los parámetros de aceptación con la que se evaluó">
+            Reglas v{r.evaluacion_idoneidad.regla_version}
+          </span>
+        {/if}
       </div>
       {#if ia}
         <div class="anillo nivel-{nivelScore(ia.score_total)}" style="--p: {ia.score_total}" title="Score IA: {ia.score_total} de 100">
@@ -115,6 +124,8 @@
         </div>
       {/if}
     </section>
+
+    <TarjetaReglasAplicadas version={r?.evaluacion_idoneidad?.regla_version} />
 
     <section class="tarjeta">
       <h3>Evaluación de la IA</h3>
@@ -379,6 +390,11 @@
   .veredicto-no_apto {
     background: rgba(239, 68, 68, 0.1);
     color: #d14343;
+  }
+
+  .veredicto-semillero {
+    background: rgba(59, 130, 246, 0.12);
+    color: #2563eb;
   }
 
   .veredicto-pendiente {
@@ -675,6 +691,10 @@
 
   .punto-rechazado {
     background: #ef4444;
+  }
+
+  .punto-semillero {
+    background: #3b82f6;
   }
 
   .punto-error {

@@ -136,6 +136,7 @@ func (r *RepositorioMySQL) leerOfertas() ([]ofertaLeida, error) {
 				TotalAptos:      o.Aptos,
 				TotalNoAptos:    o.Total - o.Aptos,
 				TotalPendientes: o.Pendientes,
+				TotalSemilleros: o.Semilleros,
 				TieneRankingIA:  errRanking == nil,
 				ActualizadoEn:   o.ActualizadoEn,
 			},

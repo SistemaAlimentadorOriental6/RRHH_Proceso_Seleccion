@@ -129,8 +129,36 @@ func (ac *AgenteClasificador) DeterminarGenero(nombre string, textoPerfil string
 	return "No especificado"
 }
 
-// EvaluarEPS verifica que la EPS pertenezca a las autorizadas, sin importar si la afiliación figura activa o retirada.
-func (ac *AgenteClasificador) EvaluarEPS(res *modelos.ResultadoAdres) (bool, string) {
+// ReglasDeConfiguracion son las reglas que se aplican cuando no hay base de datos de la que leerlas: las
+// mismas de la versión 1 de reglas_idoneidad (las que el código aplicaba antes de los parámetros).
+func ReglasDeConfiguracion(cfg *configuracion.Configuracion) modelos.ReglasIdoneidad {
+	r := modelos.ReglasIdoneidad{
+		EdadMinima: 22, EdadMaxima: 49,
+		EpsAceptadas:        []string{"Sura", "Nueva EPS", "Savia Salud", "Sanitas"},
+		GenerosAceptados:    []string{"masculino"},
+		LicenciasAceptadas:  []string{"C2", "C3"},
+		RuntAntiguedadMeses: 24,
+	}
+	if cfg != nil {
+		r.EdadMinima, r.EdadMaxima = cfg.EdadMinimaContratacion, cfg.EdadMaximaContratacion
+		if len(cfg.EPSAutorizadas) > 0 {
+			r.EpsAceptadas = cfg.EPSAutorizadas
+		}
+	}
+	return r
+}
+
+// ReglasDe son las reglas con las que se evalúa al candidato: las suyas o, si no tiene, las de la configuración.
+func (ac *AgenteClasificador) ReglasDe(c *modelos.Candidato) *modelos.ReglasIdoneidad {
+	if c != nil && c.Reglas != nil {
+		return c.Reglas
+	}
+	r := ReglasDeConfiguracion(ac.cfg)
+	return &r
+}
+
+// EvaluarEPS verifica que la EPS sea una de las aceptadas, sin importar si la afiliación figura activa o retirada.
+func (ac *AgenteClasificador) EvaluarEPS(res *modelos.ResultadoAdres, reglas *modelos.ReglasIdoneidad) (bool, string) {
 	if res == nil {
 		return false, "Sin información de ADRES"
 	}
@@ -139,26 +167,20 @@ func (ac *AgenteClasificador) EvaluarEPS(res *modelos.ResultadoAdres) (bool, str
 		return true, "ADRES en mantenimiento oficial (Pendiente validación EPS)"
 	}
 
-	eps := strings.ToUpper(res.EPS)
-
-	// El estado de la afiliación (activo, retirado...) no importa: solo que la EPS sea una de las autorizadas.
-	autorizada := false
-	for _, aut := range ac.cfg.EPSAutorizadas {
-		if strings.Contains(eps, strings.ToUpper(aut)) {
-			autorizada = true
-			break
-		}
+	if res.Estado == EstadoAdresNoAfiliado {
+		return false, "No figura afiliado a ninguna EPS en ADRES (BDUA)"
 	}
 
-	if !autorizada {
-		return false, fmt.Sprintf("EPS '%s' no autorizada (Solo Sura, Nueva EPS, Savia Salud, Sanitas)", res.EPS)
+	// El estado de la afiliación (activo, retirado...) no importa: solo que la EPS sea una de las aceptadas.
+	if !EPSAceptada(res.EPS, reglas.EpsAceptadas) {
+		return false, fmt.Sprintf("EPS '%s' no autorizada (aceptadas: %s)", res.EPS, strings.Join(reglas.EpsAceptadas, ", "))
 	}
 
 	return true, fmt.Sprintf("EPS %s (%s)", res.EPS, res.EstadoAfiliacion)
 }
 
-// EvaluarRunt verifica antiguedad minima de 2 anos y licencia C2 o C3 activa.
-func (ac *AgenteClasificador) EvaluarRunt(res *modelos.ResultadoRunt) (bool, string) {
+// EvaluarRunt verifica el tiempo mínimo inscrito en el RUNT y una licencia activa de las categorías aceptadas.
+func (ac *AgenteClasificador) EvaluarRunt(res *modelos.ResultadoRunt, reglas *modelos.ReglasIdoneidad) (bool, string) {
 	if res == nil {
 		return false, "Sin información de RUNT"
 	}
@@ -167,39 +189,39 @@ func (ac *AgenteClasificador) EvaluarRunt(res *modelos.ResultadoRunt) (bool, str
 		return false, fmt.Sprintf("No inscrito o inactivo en RUNT (%s)", res.Estado)
 	}
 
-	// 1. Antigüedad en RUNT (mínimo 2 años)
-	antiguedadAnios := 0.0
+	// 1. Antigüedad en RUNT, en meses completos
+	antiguedadMeses := 0
 	if res.FechaInscripcion != "" {
 		limpio := strings.Split(res.FechaInscripcion, ".")[0]
 		limpio = strings.ReplaceAll(limpio, "T", " ")
 		for _, layout := range []string{"2006-01-02 15:04:05", "2006-01-02"} {
 			if t, err := time.Parse(layout, limpio); err == nil {
-				dias := time.Since(t).Hours() / 24
-				antiguedadAnios = dias / 365.25
+				antiguedadMeses = mesesCompletos(t, time.Now())
 				break
 			}
 		}
 	}
 
-	// 2. Licencia activa con C2 o C3
+	// 2. Licencia activa en alguna de las categorías aceptadas
+	aceptada := func(cat string) bool {
+		cat = strings.ToUpper(strings.TrimSpace(cat))
+		for _, l := range reglas.LicenciasAceptadas {
+			if cat == strings.ToUpper(l) {
+				return true
+			}
+		}
+		return false
+	}
 	tieneCategoria := false
 	for _, lic := range res.Licencias {
 		if strings.ToUpper(lic.Estado) != "ACTIVA" {
 			continue
 		}
 		for _, c := range lic.Categorias {
-			cu := strings.ToUpper(c)
-			if cu == "C2" || cu == "C3" {
-				tieneCategoria = true
-				break
-			}
+			tieneCategoria = tieneCategoria || aceptada(c)
 		}
 		for _, det := range lic.DetallesCategorias {
-			cu := strings.ToUpper(det.Categoria)
-			if cu == "C2" || cu == "C3" {
-				tieneCategoria = true
-				break
-			}
+			tieneCategoria = tieneCategoria || aceptada(det.Categoria)
 		}
 		if tieneCategoria {
 			break
@@ -207,94 +229,210 @@ func (ac *AgenteClasificador) EvaluarRunt(res *modelos.ResultadoRunt) (bool, str
 	}
 
 	if !tieneCategoria {
+		// CategoriasActivas trae textos como "C2 - CAMIONES RÍGIDOS": se mira cada palabra.
 		for _, catAct := range res.CategoriasActivas {
-			if strings.Contains(catAct, "C2") || strings.Contains(catAct, "C3") {
-				tieneCategoria = true
-				break
+			for _, p := range palabrasDe(catAct) {
+				tieneCategoria = tieneCategoria || aceptada(p)
 			}
 		}
 	}
 
+	licencias := listaO(reglas.LicenciasAceptadas)
 	if !tieneCategoria {
-		return false, "No posee licencia activa en categoría C2 o C3"
+		return false, fmt.Sprintf("No posee licencia activa en categoría %s", licencias)
 	}
 
-	if antiguedadAnios < 2.0 {
-		return false, fmt.Sprintf("Antigüedad en RUNT insuficiente: %.1f años (Mínimo 2 años requeridos)", antiguedadAnios)
+	if antiguedadMeses < reglas.RuntAntiguedadMeses {
+		return false, fmt.Sprintf("Antigüedad en RUNT insuficiente: %s (mínimo %s requerido)",
+			modelos.TextoMeses(antiguedadMeses), modelos.TextoMeses(reglas.RuntAntiguedadMeses))
 	}
 
-	return true, fmt.Sprintf("RUNT OK: %.1f años de registro | Licencia C2/C3 ACTIVA", antiguedadAnios)
+	return true, fmt.Sprintf("RUNT OK: %s de registro | Licencia %s ACTIVA", modelos.TextoMeses(antiguedadMeses), licencias)
 }
 
-// EvaluarSimit valida 0 multas o comparendos hasta $1.000.000 con acuerdo de pago.
+// listaO junta valores como "C1, C2 o C3".
+func listaO(l []string) string {
+	if len(l) < 2 {
+		return strings.Join(l, "")
+	}
+	return strings.Join(l[:len(l)-1], ", ") + " o " + l[len(l)-1]
+}
+
+// mesesCompletos cuenta los meses cumplidos entre desde y hasta (15/01 → 14/03 son 1 mes; → 15/03 son 2).
+func mesesCompletos(desde, hasta time.Time) int {
+	m := (hasta.Year()-desde.Year())*12 + int(hasta.Month()) - int(desde.Month())
+	if hasta.Day() < desde.Day() {
+		m--
+	}
+	return max(m, 0)
+}
+
+// Topes del SIMIT: con acuerdo de pago hasta $1.000.000 cumple; hasta $2.000.000 queda para semillero;
+// por encima se descarta.
+// shortcut: topes fijos en el código; pasarlos a Configuración > Parámetros si cambian a menudo.
+const (
+	simitTopeAceptable = 1_000_000
+	simitTopeSemillero = 2_000_000
+)
+
+// EvaluarSimit dice si el SIMIT cumple (ver NivelSimit).
 func (ac *AgenteClasificador) EvaluarSimit(res *modelos.ResultadoSimit) (bool, string) {
+	nivel, detalle := NivelSimit(res)
+	return nivel == modelos.NivelCumple, detalle
+}
+
+// NivelSimit clasifica el SIMIT por la deuda y el acuerdo de pago:
+//   - sin deuda (o paz y salvo): cumple
+//   - con acuerdo de pago hasta $1.000.000: cumple
+//   - con o sin acuerdo hasta $2.000.000: semillero
+//   - más de $2.000.000: descarte
+//
+// Una consulta fallida da semillero con detalle "no verificado": el orquestador la deja pendiente.
+func NivelSimit(res *modelos.ResultadoSimit) (nivel, detalle string) {
 	if res == nil {
-		return false, "Sin información de SIMIT"
+		return modelos.NivelSemillero, "Sin información de SIMIT"
 	}
 
 	// Una consulta fallida o sin cédula no es evidencia de "0 multas": hay que reintentarla.
 	if strings.HasPrefix(res.Estado, "ERROR") || res.Estado == "NO_APLICA" || res.Estado == "SIN_CEDULA" {
-		return false, fmt.Sprintf("SIMIT no verificado (%s): reintente la consulta", res.Estado)
+		return modelos.NivelSemillero, fmt.Sprintf("SIMIT no verificado (%s): reintente la consulta", res.Estado)
 	}
 
-	multas := res.CantidadMultas
-	comparendos := res.CantidadComparendos
-	acuerdos := res.CantidadAcuerdos
-	pazYSalvo := res.PazYSalvo
+	multas, comparendos, acuerdos := res.CantidadMultas, res.CantidadComparendos, res.CantidadAcuerdos
+	deuda := Pesos(res.TotalDeuda)
 
-	deudaNum, _ := strconv.Atoi(soloDigitos(res.TotalDeuda))
-
-	// Caso 1: 0 multas y paz y salvo (o sin comparendos pendientes)
-	if multas == 0 && (comparendos == 0 || pazYSalvo || deudaNum == 0) {
-		return true, "SIMIT OK: 0 multas y Paz y Salvo"
+	if multas == 0 && (comparendos == 0 || res.PazYSalvo || deuda == 0) {
+		return modelos.NivelCumple, "SIMIT OK: 0 multas y Paz y Salvo"
 	}
-
-	// Caso 2: 0 multas, comparendos hasta $1.000.000 con acuerdo de pago
-	if multas == 0 && deudaNum <= 1000000 && acuerdos > 0 {
-		return true, fmt.Sprintf("SIMIT OK: Comparendos en acuerdo de pago ($%d) <= $1.000.000", deudaNum)
+	pendiente := fmt.Sprintf("%d comparendos y %d multas", comparendos, multas)
+	switch {
+	case deuda > simitTopeSemillero:
+		return modelos.NivelDescarte, fmt.Sprintf("SIMIT: deuda de %s supera el tope de %s (%s)", PesosTexto(deuda), PesosTexto(simitTopeSemillero), pendiente)
+	case acuerdos > 0 && deuda <= simitTopeAceptable:
+		return modelos.NivelCumple, fmt.Sprintf("SIMIT OK: %s en acuerdo de pago (%s, hasta %s)", pendiente, PesosTexto(deuda), PesosTexto(simitTopeAceptable))
+	case acuerdos > 0:
+		return modelos.NivelSemillero, fmt.Sprintf("SIMIT: acuerdo de pago de %s, entre %s y %s (semillero)", PesosTexto(deuda), PesosTexto(simitTopeAceptable), PesosTexto(simitTopeSemillero))
 	}
-
-	var motivos []string
-	if multas > 0 {
-		motivos = append(motivos, fmt.Sprintf("%d multas de tránsito", multas))
-	}
-	if comparendos > 0 && acuerdos == 0 {
-		motivos = append(motivos, fmt.Sprintf("%d comparendos sin acuerdo de pago ($%d)", comparendos, deudaNum))
-	} else if deudaNum > 1000000 {
-		motivos = append(motivos, fmt.Sprintf("Deuda ($%d) excede el tope de $1.000.000", deudaNum))
-	}
-
-	return false, fmt.Sprintf("SIMIT Rechazado: %s", strings.Join(motivos, ", "))
+	return modelos.NivelSemillero, fmt.Sprintf("SIMIT: %s sin acuerdo de pago (%s)", pendiente, PesosTexto(deuda))
 }
 
-// Evaluar aplica los 4 filtros al candidato consolidado.
+// Pesos lee un valor como "$ 1.234.567" o "$1.234.567,00" (los centavos se ignoran).
+func Pesos(texto string) int {
+	var limpio strings.Builder
+	for _, r := range texto {
+		if r >= '0' && r <= '9' || r == '.' || r == ',' {
+			limpio.WriteRune(r)
+		}
+	}
+	s := limpio.String()
+	// ",00" o ".00" al final son centavos; con tres cifras es separador de miles.
+	if n := len(s); n >= 3 && (s[n-3] == ',' || s[n-3] == '.') {
+		s = s[:n-3]
+	}
+	v, _ := strconv.Atoi(soloDigitos(s))
+	return v
+}
+
+// PesosTexto escribe 1234567 como "$1.234.567".
+func PesosTexto(v int) string {
+	d := strconv.Itoa(v)
+	for i := len(d) - 3; i > 0; i -= 3 {
+		d = d[:i] + "." + d[i:]
+	}
+	return "$" + d
+}
+
+// MotivoGenero es el motivo de descarte de quien no tiene un género aceptado.
+func MotivoGenero(genero string, reglas *modelos.ReglasIdoneidad) string {
+	return fmt.Sprintf("Género (%s) no cumple requisito (requerido: %s)", genero, reglas.GeneroRequerido())
+}
+
+// MotivoIncidentes devuelve los incidentes (antecedentes en la Procuraduría o coincidencias en listas ONU y
+// OFAC) que descartan a la persona; vacío si no tiene.
+func MotivoIncidentes(c *modelos.Candidato) []string {
+	var l []string
+	if r := c.ResultadoProcuraduria; r != nil && r.Alerta {
+		l = append(l, "Incidente: antecedentes en la Procuraduría ("+primero(r.Detalles, r.Estado)+")")
+	}
+	if r := c.ResultadoSarlaft; r != nil && r.Alerta {
+		l = append(l, "Incidente: coincidencia en la lista ONU ("+primero(r.Detalles, "SARLAFT")+")")
+	}
+	if r := c.ResultadoOfac; r != nil && r.Alerta {
+		l = append(l, "Incidente: coincidencia en la lista OFAC ("+primero(r.Detalles, r.Estado)+")")
+	}
+	return l
+}
+
+// MotivoReintegro es el motivo de descarte de quien ya fue empleado si no se aceptan reintegros; vacío si no aplica.
+func MotivoReintegro(c *modelos.Candidato, reglas *modelos.ReglasIdoneidad) string {
+	r := c.ResultadoReintegro
+	if r == nil || !r.Alerta || r.Estado == modelos.ReintegroErrorConsulta || reglas.AceptaReintegros {
+		return ""
+	}
+	return "Reintegro: " + r.Detalles + ": no se admiten reintegros"
+}
+
+func primero(textos ...string) string {
+	for _, t := range textos {
+		if strings.TrimSpace(t) != "" {
+			return t
+		}
+	}
+	return ""
+}
+
+// Evaluar aplica todas las reglas al candidato consolidado, con sus reglas, y lo clasifica:
+//   - descartado: género no aceptado, mayor a la edad tope, reintegro no aceptado, incidentes o SIMIT > $2.000.000
+//   - semillero: no cumple la edad mínima, la EPS, el RUNT o el SIMIT (hasta $2.000.000), sin nada que lo descarte
+//   - reclutado P1: cumple todo
 func (ac *AgenteClasificador) Evaluar(c *modelos.Candidato) *modelos.EvaluacionIdoneidad {
 	// El género ya lo decidió el flujo (diccionario, perfil o IA): no se vuelve a adivinar aquí.
 	genero := c.Genero
 	if genero == "" || genero == "No especificado" {
 		genero = ac.DeterminarGenero(c.Nombre, c.TextoPerfil)
 	}
-	cumpleGenero := (genero == "Hombre")
+	reglas := ac.ReglasDe(c)
+	cumpleGenero := reglas.AceptaGenero(genero)
 
-	cumpleEPS, detalleEPS := ac.EvaluarEPS(c.ResultadoAdres)
-	cumpleRunt, detalleRunt := ac.EvaluarRunt(c.ResultadoRunt)
-	cumpleSimit, detalleSimit := ac.EvaluarSimit(c.ResultadoSimit)
+	cumpleEPS, detalleEPS := ac.EvaluarEPS(c.ResultadoAdres, reglas)
+	cumpleRunt, detalleRunt := ac.EvaluarRunt(c.ResultadoRunt, reglas)
+	nivelSimit, detalleSimit := NivelSimit(c.ResultadoSimit)
 
-	var motivos []string
+	var descartes, semilleros, semillero []string
 	if !cumpleGenero {
-		motivos = append(motivos, fmt.Sprintf("Género (%s) no cumple requisito (requerido: Hombre)", genero))
+		descartes = append(descartes, MotivoGenero(genero, reglas))
+	}
+	switch nivel, motivo := reglas.NivelEdad(c.Edad); nivel {
+	case modelos.NivelDescarte:
+		descartes = append(descartes, motivo)
+	case modelos.NivelSemillero:
+		semilleros, semillero = append(semilleros, motivo), append(semillero, "edad")
+	}
+	if m := MotivoReintegro(c, reglas); m != "" {
+		descartes = append(descartes, m)
 	}
 	if !cumpleEPS {
-		motivos = append(motivos, detalleEPS)
+		semilleros, semillero = append(semilleros, detalleEPS), append(semillero, "adres")
 	}
 	if !cumpleRunt {
-		motivos = append(motivos, detalleRunt)
+		semilleros, semillero = append(semilleros, detalleRunt), append(semillero, "runt")
 	}
-	if !cumpleSimit {
-		motivos = append(motivos, detalleSimit)
+	switch nivelSimit {
+	case modelos.NivelDescarte:
+		descartes = append(descartes, detalleSimit)
+	case modelos.NivelSemillero:
+		semilleros, semillero = append(semilleros, detalleSimit), append(semillero, "simit")
 	}
+	descartes = append(descartes, MotivoIncidentes(c)...)
 
-	esApto := len(motivos) == 0
+	clasificacion := modelos.ClasificacionReclutadoP1
+	switch {
+	case len(descartes) > 0:
+		clasificacion = modelos.ClasificacionDescartado
+	case len(semilleros) > 0:
+		clasificacion = modelos.ClasificacionSemillero
+	}
+	esApto := clasificacion == modelos.ClasificacionReclutadoP1
 
 	ev := &modelos.EvaluacionIdoneidad{
 		EsApto:          esApto,
@@ -304,9 +442,12 @@ func (ac *AgenteClasificador) Evaluar(c *modelos.Candidato) *modelos.EvaluacionI
 		DetalleEPS:      detalleEPS,
 		CumpleRunt:      cumpleRunt,
 		DetalleRunt:     detalleRunt,
-		CumpleSimit:     cumpleSimit,
+		CumpleSimit:     nivelSimit == modelos.NivelCumple,
 		DetalleSimit:    detalleSimit,
-		MotivosDescarte: motivos,
+		MotivosDescarte: append(descartes, semilleros...), // primero lo que descarta
+		ReglaVersion:    reglas.Version,
+		Clasificacion:   clasificacion,
+		Semillero:       semillero,
 	}
 
 	c.Genero = genero

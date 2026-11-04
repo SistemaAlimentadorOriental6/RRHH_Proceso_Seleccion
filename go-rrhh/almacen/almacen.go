@@ -25,7 +25,8 @@ type Almacen struct {
 	descargas   string
 	slug        func(string) string // título de vacante -> slug
 	slugPersona func(string) string // nombre -> slug
-	reglaID     []byte              // reglas de idoneidad vigentes
+	reglaID     []byte              // reglas de idoneidad vigentes (leer con reglaVigente: cambia al guardar parámetros)
+	muRegla     sync.RWMutex
 	fuentes     map[string]bool     // códigos de la tabla fuentes (las nuevas llegan con migraciones opcionales)
 
 	mu      sync.Mutex
@@ -105,7 +106,7 @@ func nuevo(ctx context.Context, db *sql.DB, k *claves, descargas string, slug, s
 	if faltan, err := columnasFaltantes(ctx, db); err != nil {
 		return nil, fmt.Errorf("verificando las columnas de la base: %w", err)
 	} else if len(faltan) > 0 {
-		return nil, fmt.Errorf("a la base le faltan columnas (%s): ejecute completos 002 a 006 de almacen/migraciones/, que son seguros de repetir", strings.Join(faltan, ", "))
+		return nil, fmt.Errorf("a la base le faltan columnas (%s): ejecute completos 002 a 010 de almacen/migraciones/, que son seguros de repetir", strings.Join(faltan, ", "))
 	}
 
 	a := &Almacen{db: db, claves: k, descargas: descargas, slug: slug, slugPersona: slugPersona, ofertas: map[string][]byte{}, fuentes: map[string]bool{}}
@@ -134,6 +135,7 @@ var columnasNecesarias = []string{
 	"usuarios.clave_hash", "sesiones.token_hash", "perfiles.edad",
 	"evaluaciones_idoneidad.genero", "evaluaciones_idoneidad.detalle_eps",
 	"evaluaciones_idoneidad.detalle_runt", "evaluaciones_idoneidad.detalle_simit",
+	"evaluaciones_idoneidad.clasificacion", "evaluaciones_idoneidad.semillero", "postulaciones.clasificacion", // 010
 }
 
 // columnasFaltantes devuelve cuáles de columnasNecesarias no existen en la base.

@@ -23,9 +23,10 @@ export interface VacanteApi {
 export interface ResumenAnalizadosApi {
   postulados: number;
   aptos: number;
-  /** Sin contar los de verificación pendiente. */
+  /** Descartados: sin contar los de verificación pendiente ni los semilleros. */
   no_aptos: number;
   pendientes: number;
+  semilleros?: number;
 }
 
 export type IdEtapa =
@@ -62,6 +63,8 @@ export type EstadoEtapa =
   | 'reintentando'
   | 'ok'
   | 'rechazado'
+  /** No cumple la regla, pero solo deja a la persona para semillero: el análisis siguió (azul). */
+  | 'semillero'
   | 'alerta'
   | 'error'
   | 'omitida';
@@ -156,6 +159,12 @@ export interface CandidatoApi {
     motivos_descarte: string[] | null;
     descarte_temprano?: boolean;
     verificacion_pendiente?: boolean;
+    /** Versión de los parámetros de aceptación con la que se evaluó (Configuración > Parámetros). */
+    regla_version?: number;
+    /** Sin valor mientras no hay dictamen (pendiente o en pausa) o si se evaluó antes de existir. */
+    clasificacion?: Clasificacion;
+    /** Reglas que no cumple pero que solo la dejan para semillero. */
+    semillero?: ('edad' | 'adres' | 'runt' | 'simit')[];
   };
   evaluacion_ia?: EvaluacionIaApi;
   error_proceso?: string;
@@ -179,7 +188,10 @@ export interface CandidatoApi {
 
 export type FaseCandidato = 'en_cola' | 'analizando' | 'completo';
 
-export type Veredicto = 'en_cola' | 'analizando' | 'apto' | 'no_apto' | 'pendiente';
+export type Clasificacion = 'reclutado_p1' | 'semillero' | 'descartado';
+
+/** apto = reclutado P1; no_apto = descartado. */
+export type Veredicto = 'en_cola' | 'analizando' | 'apto' | 'semillero' | 'no_apto' | 'pendiente';
 
 export interface CandidatoEnVivo {
   indice: number;
@@ -217,6 +229,8 @@ export interface ResumenAnalisis {
   errores: number;
   pendientes: number;
   descartes_tempranos: number;
+  /** Incluidos en no_aptos. */
+  semilleros?: number;
   listado_completo: boolean;
 }
 

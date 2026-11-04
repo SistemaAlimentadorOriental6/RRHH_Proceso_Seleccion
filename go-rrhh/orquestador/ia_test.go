@@ -64,3 +64,24 @@ func TestEvaluarConIAConFalloDejaAlAptoSinPuntaje(t *testing.T) {
 		t.Fatalf("debe informar el error: %v", rep.etapas)
 	}
 }
+
+// La IA también califica a los semilleros (siguen en el proceso); no a descartados ni a pendientes.
+func TestEvaluarConIACalificaSemilleros(t *testing.T) {
+	for _, caso := range []struct {
+		nombre string
+		ev     *modelos.EvaluacionIdoneidad
+		quiero bool
+	}{
+		{"semillero", &modelos.EvaluacionIdoneidad{Clasificacion: modelos.ClasificacionSemillero}, true},
+		{"reclutado P1", &modelos.EvaluacionIdoneidad{EsApto: true, Clasificacion: modelos.ClasificacionReclutadoP1}, true},
+		{"descartado", &modelos.EvaluacionIdoneidad{Clasificacion: modelos.ClasificacionDescartado}, false},
+		{"pendiente", &modelos.EvaluacionIdoneidad{VerificacionPendiente: true}, false},
+	} {
+		ia := &iaFalsa{ev: &modelos.EvaluacionIA{ScoreTotal: 60, Dictamen: "Apto"}}
+		a := NuevoAnalizadorConValidadores(nil, nil, OpcionesAnalisis{}, &reporteroEtapas{}, Validadores{}).ConEvaluadorIA(ia)
+		c := &modelos.Candidato{Nombre: "A", EvaluacionIdoneidad: caso.ev}
+		if got := a.evaluarConIA(context.Background(), c); got != caso.quiero {
+			t.Errorf("%s: calificó = %v, se esperaba %v", caso.nombre, got, caso.quiero)
+		}
+	}
+}

@@ -175,6 +175,22 @@ func (c *ControladorRRHH) ejecutarReanudacion(t *almacen.TrabajoReanudacion) (fa
 	if err != nil {
 		return fmt.Errorf("no se pudo cargar al candidato: %w", err)
 	}
+	// Segunda oportunidad a un descartado: se vuelve a comprobar justo antes de gastar consultas, porque
+	// desde que se encoló pudieron cambiar los parámetros (u otro usuario ya lo reanalizó).
+	if c.reanalisis != nil && (t.Origen == almacen.OrigenReanalisis || orquestador.EsDescartadoFirme(candidato)) {
+		reglas, err := c.reanalisis.ParametrosVigentes(ctx)
+		if err != nil {
+			return fmt.Errorf("no se pudieron leer los parámetros vigentes: %w", err)
+		}
+		if !orquestador.EsDescartadoFirme(candidato) {
+			log.Printf("[=] Reanálisis de %s omitido: ya no está descartado", candidato.Nombre)
+			return nil
+		}
+		if motivo := orquestador.MotivoSigueDescartado(candidato, &reglas); motivo != "" {
+			log.Printf("[=] Reanálisis de %s omitido con los parámetros v%d: %s", candidato.Nombre, reglas.Version, motivo)
+			return nil
+		}
+	}
 	opts := orquestador.OpcionesAnalisis{Concurrencia: 1, Antecedentes: true, Sarlaft: true, Ofac: true}
 	analizador := c.fabricaAnalizador(nil, opts, reporteroReanudacion{d: c.cambios, postulacionID: t.PostulacionID})
 	defer analizador.Cerrar()

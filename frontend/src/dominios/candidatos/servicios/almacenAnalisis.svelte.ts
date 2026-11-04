@@ -1,4 +1,6 @@
 import toast from 'svelte-french-toast';
+import { SvelteSet } from 'svelte/reactivity';
+import { colaReanalisis } from './reanalisis';
 import {
   ETAPAS_NUCLEO,
   ETIQUETA_ETAPA,
@@ -66,14 +68,16 @@ export function veredictoDe(c: CandidatoEnVivo): Veredicto {
   if (c.fase === 'analizando') return 'analizando';
   const ev = c.resultado?.evaluacion_idoneidad;
   if (ev?.verificacion_pendiente) return 'pendiente';
+  if (ev?.clasificacion === 'semillero') return 'semillero';
   return c.resultado?.es_apto ? 'apto' : 'no_apto';
 }
 
 export const ETIQUETA_VEREDICTO: Record<Veredicto, string> = {
   en_cola: 'En cola',
   analizando: 'Analizando…',
-  apto: 'Apto',
-  no_apto: 'No apto',
+  apto: 'Reclutado P1',
+  semillero: 'Semillero',
+  no_apto: 'Descartado',
   pendiente: 'Verificación pendiente'
 };
 
@@ -135,12 +139,11 @@ export function etapasDesdeResultado(
     );
   }
 
+  const motivos = ev?.motivos_descarte ?? [];
+  const motivoDe = (prefijo: string) => motivos.find((m) => m.startsWith(prefijo));
+
   if (ev) {
-    poner(
-      'genero',
-      ev.cumple_genero ? 'ok' : 'rechazado',
-      ev.cumple_genero ? ev.genero : `Género (${ev.genero}) no cumple requisito (requerido: Hombre)`
-    );
+    poner('genero', ev.cumple_genero ? 'ok' : 'rechazado', ev.cumple_genero ? ev.genero : (motivoDe('Género') ?? `Género (${ev.genero}) no cumple el requisito`));
 
     const nucleo: [IdEtapa, boolean, string][] = [
       ['adres', ev.cumple_eps, ev.detalle_eps],
@@ -152,7 +155,7 @@ export function etapasDesdeResultado(
       else if (cumple) poner(id, 'ok', detalle);
       else if (ev.verificacion_pendiente && (detalle.includes('no verificado') || detalle.includes('Sin información'))) {
         poner(id, 'error', detalle);
-      } else poner(id, 'rechazado', detalle);
+      } else poner(id, ev.semillero?.includes(id as 'adres') ? 'semillero' : 'rechazado', detalle);
     }
   }
 
@@ -174,17 +177,21 @@ export function etapasDesdeResultado(
     } else if (res.estado === 'ERROR_CONSULTA') {
       poner(id, 'error', detalle);
     } else if (id === 'reintegro' && res.alerta) {
-      poner(id, 'rechazado', `${detalle}: no se admiten reintegros`); // regla que descarta, no un simple aviso
+      // Descarta solo si no se aceptan reintegros (entonces es un motivo); si se aceptan, queda como aviso.
+      const motivo = motivoDe('Reintegro');
+      poner(id, motivo ? 'rechazado' : 'alerta', motivo ?? `${detalle}: se aceptan reintegros`);
+    } else if (res.alerta && ev?.clasificacion === 'descartado' && motivoDe('Incidente')) {
+      poner(id, 'rechazado', detalle); // un incidente descarta
     } else poner(id, res.alerta ? 'alerta' : 'ok', detalle);
   }
 
-  // La IA solo califica a quien cumplió todas las validaciones.
+  // La IA califica a quien sigue en el proceso: reclutados P1 y semilleros.
   if (r.evaluacion_ia) {
     poner('ia', 'ok', `Score ${r.evaluacion_ia.score_total}/100 · ${r.evaluacion_ia.dictamen}`);
-  } else if (r.es_apto) {
+  } else if (r.es_apto || ev?.clasificacion === 'semillero') {
     poner('ia', 'omitida', 'Sin calificar: la IA aún no evaluó a este candidato (se reintenta al reanalizar)');
   } else {
-    poner('ia', 'omitida', 'No aplica: la IA solo califica a quien cumple todas las validaciones');
+    poner('ia', 'omitida', 'No aplica: la IA solo califica a reclutados P1 y semilleros');
   }
 
   // Capturas guardadas en disco (candidatos de caché o ya analizados): se adjuntan a su etapa.
@@ -657,6 +664,7 @@ export class SesionAnalisis {
       reintentando: 'reintentando',
       ok: 'ok',
       rechazado: 'rechazado',
+      semillero: 'semillero',
       alerta: 'alerta',
       error: 'error',
       omitida: 'omitida'
@@ -682,6 +690,9 @@ export class SesionAnalisis {
         break;
       case 'rechazado':
         this.linea(c, id, 'error', `${etiqueta} no cumple${detalle ? ` — ${detalle}` : ''}${tiempo}`);
+        break;
+      case 'semillero':
+        this.linea(c, id, 'warn', `${etiqueta} no cumple: SEMILLERO, se sigue con las demás${detalle ? ` — ${detalle}` : ''}${tiempo}`);
         break;
       case 'error':
         this.linea(c, id, 'error', `${etiqueta} no pudo verificarse${detalle ? ` — ${detalle}` : ''}${tiempo}`);
@@ -713,13 +724,16 @@ export class SesionAnalisis {
     c.fase = 'completo';
 
     const ev = r.evaluacion_idoneidad;
-    const origen = r.cache ? ' (resultado guardado)' : '';
+    const version = ev?.regla_version ? `reglas v${ev.regla_version}` : '';
+    const origen = r.cache ? ` (resultado guardado${version ? `, ${version}` : ''})` : version ? ` (${version})` : '';
     if (ev?.verificacion_pendiente) {
       this.linea(c, 'general', 'warn', `VERIFICACIÓN PENDIENTE${origen}: ${(ev.motivos_descarte ?? []).join('; ')}`);
     } else if (r.es_apto) {
-      this.linea(c, 'general', 'ok', `APTO${origen}: cumple las ${ETAPAS_NUCLEO.length} reglas`);
+      this.linea(c, 'general', 'ok', `RECLUTADO P1${origen}: cumple las ${ETAPAS_NUCLEO.length} reglas`);
+    } else if (ev?.clasificacion === 'semillero') {
+      this.linea(c, 'general', 'warn', `SEMILLERO${origen}: ${(ev.motivos_descarte ?? []).join('; ')}`);
     } else {
-      this.linea(c, 'general', 'error', `NO APTO${origen}: ${(ev?.motivos_descarte ?? []).join('; ') || 'no cumple los requisitos'}`);
+      this.linea(c, 'general', 'error', `DESCARTADO${origen}: ${(ev?.motivos_descarte ?? []).join('; ') || 'no cumple los requisitos'}`);
     }
   }
 }
@@ -947,6 +961,21 @@ class AlmacenRrhh {
   versionCambios = $state(0);
   /** El servidor está revisando el correo y Computrabajo ahora mismo (una vez por minuto). */
   revisando = $state(false);
+  /**
+   * Postulaciones de descartados que se están reanalizando con los parámetros nuevos (pendientes o en curso).
+   * Sale del servidor y se relee con cada aviso: todos los usuarios ven la misma cola aunque recarguen.
+   */
+  reanalisis = new SvelteSet<string>();
+
+  async cargarReanalisis(): Promise<void> {
+    try {
+      const ids = new Set(await colaReanalisis());
+      for (const id of [...this.reanalisis]) if (!ids.has(id)) this.reanalisis.delete(id);
+      for (const id of ids) this.reanalisis.add(id);
+    } catch {
+      // Sin la cola solo se pierde el aviso de "en cola"; el siguiente cambio la vuelve a leer.
+    }
+  }
   private finRevision: ReturnType<typeof setTimeout> | undefined;
   private cambiosIniciado = false;
   private cambiosYaAbierto = false;
@@ -991,6 +1020,7 @@ class AlmacenRrhh {
     const refrescar = () => {
       this.versionCambios++;
       this.sesiones.forEach((s) => void s.refrescar());
+      void this.cargarReanalisis();
     };
     const leer = <T>(e: Event): T | null => {
       try {
@@ -1026,7 +1056,7 @@ class AlmacenRrhh {
     }
     origen.addEventListener('reanudacion.fallida', (e) => {
       const d = leer<{ intento?: number; mensaje?: string }>(e);
-      if (d) toast.error(`No se pudo continuar el análisis tras el formulario (intento ${d.intento ?? '?'}): ${d.mensaje ?? 'error'}`);
+      if (d) toast.error(`No se pudo continuar el análisis de un candidato (intento ${d.intento ?? '?'}): ${d.mensaje ?? 'error'}`);
     });
     origen.addEventListener('revision', (e) => {
       const d = leer<{ estado?: string }>(e);
@@ -1045,6 +1075,7 @@ class AlmacenRrhh {
         void this.actualizarVacantes();
       }
       this.cambiosYaAbierto = true;
+      void this.cargarReanalisis();
       void this.sincronizarAnalisis();
     };
     // Si el servidor respondió con un error (reinicio, proxy sin backend, sesión) el navegador cierra el

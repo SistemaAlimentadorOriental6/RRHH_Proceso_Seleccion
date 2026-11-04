@@ -37,7 +37,7 @@ const PLANTILLAS: Record<IdEtapa, PlantillaNodo> = {
     sello: ['PERFIL Y HOJA DE VIDA DESCARGADOS', 'NO SE PUDO LEER EL PERFIL']
   },
   genero: {
-    subtitulo: 'Requisito de la vacante: hombre (según el perfil)',
+    subtitulo: 'Género aceptado en los parámetros (si no cumple, se descarta)',
     categoria: 'Reglas de Perfil',
     claveIcono: 'usuario',
     entidad: 'Perfil del candidato en Computrabajo',
@@ -45,15 +45,15 @@ const PLANTILLAS: Record<IdEtapa, PlantillaNodo> = {
     sello: ['CUMPLE EL REQUISITO DE GÉNERO', 'NO CUMPLE EL REQUISITO DE GÉNERO']
   },
   reintegro: {
-    subtitulo: 'Quien ya fue empleado no puede reingresar: el proceso termina',
+    subtitulo: 'Si no se aceptan reintegros, quien ya fue empleado se descarta',
     categoria: 'Reintegro',
     claveIcono: 'usuario',
     entidad: 'Administremos — SIGMA SAS',
     portalUrl: 'http://administremos.sigmansas.co',
-    sello: ['SIN REINTEGRO PREVIO', 'REINTEGRO: YA FUE EMPLEADO, NO SE ADMITE']
+    sello: ['SIN REINTEGRO O REINTEGRO ACEPTADO', 'REINTEGRO: YA FUE EMPLEADO, NO SE ADMITE']
   },
   runt: {
-    subtitulo: 'Inscripción activa, antigüedad ≥ 2 años y licencia C2/C3 activa',
+    subtitulo: 'Inscripción, tiempo y licencia según los parámetros (si no cumple: semillero)',
     categoria: 'Conducción',
     claveIcono: 'runt',
     entidad: 'Registro Único Nacional de Tránsito (RUNT)',
@@ -61,7 +61,7 @@ const PLANTILLAS: Record<IdEtapa, PlantillaNodo> = {
     sello: ['RUNT CONFORME', 'RUNT NO CONFORME O SIN VERIFICAR']
   },
   simit: {
-    subtitulo: 'Multas y comparendos (tope $1.000.000 con acuerdo de pago)',
+    subtitulo: 'Acuerdo hasta $1.000.000 cumple; hasta $2.000.000 semillero; más, descarta',
     categoria: 'Tránsito',
     claveIcono: 'simit',
     entidad: 'Federación Colombiana de Municipios — SIMIT',
@@ -69,15 +69,15 @@ const PLANTILLAS: Record<IdEtapa, PlantillaNodo> = {
     sello: ['SIMIT CONFORME', 'SIMIT NO CONFORME O SIN VERIFICAR']
   },
   adres: {
-    subtitulo: 'Afiliación activa a una EPS autorizada',
+    subtitulo: 'EPS aceptada en los parámetros (si no cumple: semillero)',
     categoria: 'Seguridad Social',
     claveIcono: 'documentoCheck',
     entidad: 'ADRES — Base de Datos Única de Afiliados (BDUA)',
     portalUrl: 'https://aplicaciones.adres.gov.co/BDUA_Internet/Pages/ConsultarAfiliadoWeb_2.aspx',
-    sello: ['EPS ACTIVA Y AUTORIZADA', 'EPS NO CONFORME O SIN VERIFICAR']
+    sello: ['EPS ACEPTADA', 'EPS NO CONFORME O SIN VERIFICAR']
   },
   procuraduria: {
-    subtitulo: 'Antecedentes disciplinarios (informativo)',
+    subtitulo: 'Antecedentes disciplinarios (un incidente descarta)',
     categoria: 'Antecedentes',
     claveIcono: 'balanza',
     entidad: 'Procuraduría General de la Nación',
@@ -85,7 +85,7 @@ const PLANTILLAS: Record<IdEtapa, PlantillaNodo> = {
     sello: ['SIN ANTECEDENTES', 'ALERTA DE ANTECEDENTES']
   },
   sarlaft: {
-    subtitulo: 'Lista consolidada de sanciones ONU (informativo)',
+    subtitulo: 'Lista consolidada de sanciones ONU (una coincidencia descarta)',
     categoria: 'Listas Restrictivas',
     claveIcono: 'global',
     entidad: 'ONU — Consejo de Seguridad',
@@ -101,7 +101,7 @@ const PLANTILLAS: Record<IdEtapa, PlantillaNodo> = {
     sello: ['CALIFICACIÓN DE IA GENERADA', 'LA IA NO PUDO CALIFICAR']
   },
   ofac: {
-    subtitulo: 'Lista de sanciones OFAC EE. UU. (informativo)',
+    subtitulo: 'Lista de sanciones OFAC EE. UU. (una coincidencia descarta)',
     categoria: 'Listas Restrictivas',
     claveIcono: 'escudo',
     entidad: 'OFAC — Departamento del Tesoro de EE. UU.',
@@ -125,6 +125,7 @@ const ETIQUETA_ESTADO: Record<EstadoEtapa, string> = {
   ok: 'Aprobado',
   alerta: 'Alerta',
   rechazado: 'No cumple',
+  semillero: 'Semillero',
   error: 'Sin verificar',
   omitida: 'No consultado'
 };
@@ -135,6 +136,7 @@ const ESTADO_NODO: Record<EstadoEtapa, EstadoNodoValidacion> = {
   ok: 'completado',
   alerta: 'completado',
   rechazado: 'detenido_error',
+  semillero: 'semillero',
   error: 'detenido_error',
   omitida: 'omitido'
 };
@@ -263,7 +265,7 @@ function construirNodoEtapa(c: CandidatoEnVivo, id: IdEtapa, posicion: number): 
       {
         etiqueta: 'Estado',
         valorExito: etapa?.estado === 'alerta' ? 'Con alerta' : 'Aprobado',
-        valorError: etapa?.estado === 'error' ? 'Sin verificar' : 'No cumple'
+        valorError: etapa?.estado === 'error' ? 'Sin verificar' : etapa?.estado === 'semillero' ? 'Semillero' : 'No cumple'
       }
     ],
     evidenciaVisual: {
@@ -431,32 +433,36 @@ export function construirNodosEnVivo(c: CandidatoEnVivo, contacto?: ContactoDete
   const edadSimulada = real && formularioRecibido ? edadReal : 22 + (c.indice % 27);
   const edadNodo = edadReal || undefined;
   const sinEdad = !edadNodo;
-  // Misma regla que el backend (RRHH_EDAD_MIN/MAX_CONTRATACION): mayor de 21 y menor de 50.
-  const cumpleEdad = !!edadNodo && edadNodo > 21 && edadNodo < 50;
+  // Lo decide el backend con los parámetros de la persona: mayor al tope descarta, menor a la mínima es semillero.
+  const ev = c.resultado?.evaluacion_idoneidad;
+  const motivoEdad = ev?.motivos_descarte?.find((m) => m.startsWith('Edad'));
+  const edadSemillero = Boolean(ev?.semillero?.includes('edad'));
+  const cumpleEdad = !!edadNodo && !motivoEdad;
+  const estadoEdad: EstadoNodoValidacion =
+    !perfilListo || sinEdad ? 'pendiente' : edadSemillero ? 'semillero' : motivoEdad ? 'detenido_error' : 'completado';
+  const reglas = ev?.regla_version ? `Parámetros v${ev.regla_version}` : 'Parámetros de aceptación';
 
   const cumplimientoEdad = construirNodoMockup(c, {
     id: 'cumplimiento-edad',
     orden: 3,
     titulo: 'Cumplimiento de edad',
-    subtitulo: 'Mayor de 21 y menor de 50; si no se conoce, se pide por mensaje',
+    subtitulo: 'Mayor al tope descarta; menor a la mínima es semillero; si no se conoce, se pide por mensaje',
     categoria: 'Regla de Negocio',
     claveIcono: 'calendario',
     posicionX: colX(2),
     posicionY: Y_FLUJO,
-    estado: !perfilListo || sinEdad ? 'pendiente' : cumpleEdad ? 'completado' : 'detenido_error',
-    etiqueta: !perfilListo || sinEdad ? 'En cola' : cumpleEdad ? 'Cumple' : 'No cumple',
+    estado: estadoEdad,
+    etiqueta: !perfilListo || sinEdad ? 'En cola' : edadSemillero ? 'Semillero' : motivoEdad ? 'No cumple' : 'Cumple',
     resumen: !perfilListo
       ? 'En espera del perfil'
       : sinEdad
         ? 'Sin edad conocida: la ficha de Computrabajo no la trae'
-        : cumpleEdad
-          ? `Edad ${edadNodo} años: dentro del rango`
-          : `Edad ${edadNodo} años: fuera del rango`,
+        : (motivoEdad ?? `Edad ${edadNodo} años: dentro del rango`),
     campos: [
       ['Edad', sinEdad ? '—' : `${edadNodo} años`],
-      ['Rango', 'Mayor de 21 y menor de 50']
+      ['Rango', reglas]
     ],
-    payload: { edad: edadNodo ?? null, rangoMinimo: 21, rangoMaximo: 50, cumple: cumpleEdad, pideDatos: ramaActiva, fuente: sinEdad ? 'Sin dato' : real && formularioRecibido ? 'Formulario del candidato' : 'Ficha de Computrabajo' }
+    payload: { edad: edadNodo ?? null, cumple: cumpleEdad, semillero: edadSemillero, motivo: motivoEdad ?? null, reglaVersion: ev?.regla_version ?? null, pideDatos: ramaActiva, fuente: sinEdad ? 'Sin dato' : real && formularioRecibido ? 'Formulario del candidato' : 'Ficha de Computrabajo' }
   });
 
   // Contacto simulado (para las personas sin cédula que aún no se conectan al backend)
@@ -762,7 +768,7 @@ export function datosCandidatoDesdeVivo(c: CandidatoEnVivo): DatosCandidatoEscen
     archivoPerfil: r?.ruta_perfil_pdf ? (r.ruta_perfil_pdf.split(/[\\/]/).pop() ?? '') : 'No disponible',
     resumenPerfil: r?.evaluacion_idoneidad
       ? r.es_apto
-        ? 'Cumple las reglas de la vacante: género, licencia C2/C3 en RUNT, SIMIT y EPS autorizada.'
+        ? 'Reclutado P1: cumple todas las reglas de los parámetros de aceptación.'
         : (r.evaluacion_idoneidad.motivos_descarte ?? []).join(' · ') || 'No cumple los requisitos de la vacante.'
       : 'Análisis en curso: el dictamen aparece cuando terminan las validaciones.',
     empresasPrevias: []
@@ -803,7 +809,7 @@ export function adaptarVacante(
     areaOperativa: 'Computrabajo',
     sede: '',
     tipoContrato: '',
-    licenciaExigida: 'C2 o C3 activa (≥ 2 años)',
+    licenciaExigida: 'Según los parámetros de aceptación',
     experienciaMinima: '',
     estadoVacante: 'Activa en Evaluación',
     fechaApertura: '',

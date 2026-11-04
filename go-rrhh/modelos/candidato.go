@@ -67,6 +67,8 @@ type Candidato struct {
 	Edad int `json:"edad,omitempty"`
 	// IntentosCedula son los métodos con los que se buscó la cédula (no se guardan en el JSON).
 	IntentosCedula []IntentoCedula `json:"-"`
+	// Reglas son las reglas con las que se está evaluando a esta persona; se fijan al empezar su análisis.
+	Reglas *ReglasIdoneidad `json:"-"`
 }
 
 // Estados de un candidato cuyo análisis está en pausa o se reanuda por falta de datos.
@@ -120,7 +122,27 @@ type EvaluacionIdoneidad struct {
 	// VerificacionPendiente indica que NO se pudo comprobar alguna regla porque una consulta externa
 	// falló (portal caído, captcha, etc.). No es un rechazo: el candidato se reintenta en el siguiente análisis.
 	VerificacionPendiente bool `json:"verificacion_pendiente,omitempty"`
+	// ReglaVersion es la versión de reglas_idoneidad con la que se evaluó; 0 = reglas por defecto (sin base).
+	ReglaVersion int `json:"regla_version,omitempty"`
+	// Clasificacion es reclutado_p1, semillero o descartado; vacía mientras no hay dictamen (pendiente o en pausa).
+	Clasificacion string `json:"clasificacion,omitempty"`
+	// Semillero son las reglas que no cumple pero que solo la dejan para semillero: edad, adres, runt, simit.
+	Semillero []string `json:"semillero,omitempty"`
 }
+
+// Clasificaciones de una persona evaluada.
+const (
+	ClasificacionReclutadoP1 = "reclutado_p1" // cumple todas las reglas
+	ClasificacionSemillero   = "semillero"    // no cumple alguna regla, pero no tiene nada que la descarte
+	ClasificacionDescartado  = "descartado"   // mayor a la edad tope, reintegro no aceptado, incidentes, SIMIT > $2.000.000...
+)
+
+// Nivel de una regla: cumple, la deja para semillero o la descarta.
+const (
+	NivelCumple    = "cumple"
+	NivelSemillero = "semillero"
+	NivelDescarte  = "descarte"
+)
 
 // RegistroApto estructura la informacion final que se consolida en candidatos_aptos.json.
 type RegistroApto struct {

@@ -67,6 +67,7 @@ type ResumenAnalisis struct {
 	Errores            int    `json:"errores"`
 	Pendientes         int    `json:"pendientes"` // sin dictamen por una consulta fallida; se reintentan al reanalizar
 	DescartesTempranos int    `json:"descartes_tempranos"`
+	Semilleros         int    `json:"semilleros"` // incluidos en NoAptos
 	ListadoCompleto    bool   `json:"listado_completo"`
 	Carpeta            string `json:"carpeta,omitempty"`
 }
@@ -202,7 +203,8 @@ func (a *Analizador) contar(f func(*ResumenAnalisis)) ResumenAnalisis {
 const (
 	estadoIniciada   = "iniciada"
 	estadoOK         = "ok"
-	estadoRechazado  = "rechazado" // la regla de negocio no se cumple
+	estadoRechazado  = "rechazado" // la regla de negocio no se cumple y descarta a la persona
+	estadoSemillero  = "semillero" // no cumple la regla, pero solo la deja para semillero: el análisis sigue
 	estadoAlerta     = "alerta"    // coincidencia en listas / antecedentes (informativo)
 	estadoError      = "error"     // la consulta falló: no hay evidencia
 	estadoOmitida    = "omitida"
@@ -228,7 +230,7 @@ func (a *Analizador) etapasNucleo() []etapa {
 	return []etapa{
 		{nombre: "adres", sem: a.semAdres, validar: a.val.Adres, esNucleo: true, evaluar: func(c *modelos.Candidato) (string, bool, string) {
 			r := c.ResultadoAdres
-			cumple, det := a.clasif.EvaluarEPS(r)
+			cumple, det := a.clasif.EvaluarEPS(r, a.clasif.ReglasDe(c))
 			tecnico := r == nil || strings.HasPrefix(r.Estado, "ERROR") || r.Estado == "NO_APLICA"
 			if tecnico && r != nil {
 				det = fmt.Sprintf("ADRES no verificado (%s): %s", r.Estado, textoOr(r.Detalles, "sin detalle"))
@@ -237,7 +239,7 @@ func (a *Analizador) etapasNucleo() []etapa {
 		}},
 		{nombre: "runt", sem: a.semRunt, validar: a.val.Runt, esNucleo: true, evaluar: func(c *modelos.Candidato) (string, bool, string) {
 			r := c.ResultadoRunt
-			cumple, det := a.clasif.EvaluarRunt(r)
+			cumple, det := a.clasif.EvaluarRunt(r, a.clasif.ReglasDe(c))
 			tecnico := r == nil || strings.HasPrefix(r.Estado, "ERROR") ||
 				r.Estado == "NO_CONSULTADO_SIN_CEDULA" || r.Estado == "SIN_APELLIDO" || r.Estado == "APELLIDO_NO_COINCIDE"
 			if tecnico && r != nil {
@@ -247,12 +249,18 @@ func (a *Analizador) etapasNucleo() []etapa {
 		}},
 		{nombre: "simit", sem: a.semSimit, validar: a.val.Simit, esNucleo: true, evaluar: func(c *modelos.Candidato) (string, bool, string) {
 			r := c.ResultadoSimit
-			cumple, det := a.clasif.EvaluarSimit(r)
+			nivel, det := agentes.NivelSimit(r)
 			tecnico := r == nil || strings.HasPrefix(r.Estado, "ERROR") || r.Estado == "NO_APLICA" || r.Estado == "SIN_CEDULA"
 			if tecnico && r != nil {
 				det = fmt.Sprintf("SIMIT no verificado (%s): %s", r.Estado, textoOr(r.Detalles, "sin detalle"))
 			}
-			return clasificar(cumple, tecnico), cumple, det
+			switch {
+			case tecnico:
+				return estadoError, false, det
+			case nivel == modelos.NivelDescarte:
+				return estadoRechazado, false, det
+			}
+			return clasificar(nivel == modelos.NivelCumple, false), nivel == modelos.NivelCumple, det
 		}},
 	}
 }
@@ -275,12 +283,16 @@ func evaluarEtapaReintegro(c *modelos.Candidato) (string, bool, string) {
 		return estadoError, false, "Sin resultado de Administremos"
 	case r.Estado == modelos.ReintegroErrorConsulta:
 		return estadoError, false, "Reintegro no verificado: " + r.Detalles
+	case r.Alerta && c.Reglas != nil && c.Reglas.AceptaReintegros:
+		return estadoOK, true, r.Detalles + ": se aceptan reintegros"
 	case r.Alerta:
 		return estadoRechazado, false, r.Detalles + ": no se admiten reintegros"
 	}
 	return estadoOK, true, r.Detalles
 }
 
+// clasificar da el estado de una regla de EPS, RUNT o SIMIT: si no se cumple, la persona queda para
+// semillero y el análisis sigue (el SIMIT por encima del tope sí descarta: lo decide su etapa).
 func clasificar(cumple, tecnico bool) string {
 	switch {
 	case tecnico:
@@ -288,7 +300,7 @@ func clasificar(cumple, tecnico bool) string {
 	case cumple:
 		return estadoOK
 	default:
-		return estadoRechazado
+		return estadoSemillero
 	}
 }
 
@@ -350,6 +362,12 @@ func (a *Analizador) Analizar(ctx context.Context, oferta modelos.OfertaLaboral)
 		return a.Resumen(), fmt.Errorf("faltan las consultas RUNT, SIMIT y ADRES: son las que definen la idoneidad")
 	}
 	a.oferta = oferta // se fija antes de lanzar las goroutines que guardan a cada candidato
+	// Sin reglas legibles no se evalúa a nadie: dejarlos a todos pendientes gastaría consultas para nada.
+	if f := a.fuenteReglas(); f != nil {
+		if _, err := f.ParametrosVigentes(ctx); err != nil {
+			return a.Resumen(), fmt.Errorf("no se pudieron leer las reglas de idoneidad (Configuración > Parámetros): %w", err)
+		}
+	}
 
 	carpetaOferta := filepath.Join(a.cfg.DirectorioDescargas, agentes.LimpiarNombre(oferta.Titulo))
 	if err := os.MkdirAll(carpetaOferta, 0o755); err != nil {
@@ -390,7 +408,7 @@ func (a *Analizador) Analizar(ctx context.Context, oferta modelos.OfertaLaboral)
 				if ctx.Err() != nil {
 					continue // vaciar la cola sin procesar
 				}
-				a.procesarSeguro(ctx, t.c, carpetaOferta, acum)
+				a.procesarSeguro(ctx, t.c, t.version, carpetaOferta, acum)
 			}
 		}()
 	}
@@ -417,7 +435,9 @@ func (a *Analizador) Analizar(ctx context.Context, oferta modelos.OfertaLaboral)
 			if motivo := a.motivoSinCache(previo); motivo == "" {
 				t.previo = previo
 			} else {
-				fmt.Printf("[cache] %s se vuelve a analizar: %s\n", c.Nombre, motivo)
+				// Quien ya tuvo dictamen se vuelve a evaluar con las reglas de entonces, no con las de hoy.
+				t.version = versionConservada(previo)
+				fmt.Printf("[cache] %s se vuelve a analizar (reglas v%d): %s\n", c.Nombre, t.version, motivo)
 			}
 		}
 		// "cache" avisa a la pantalla que no es una persona nueva: ya tiene resultado y solo se confirma.
@@ -467,9 +487,11 @@ func (a *Analizador) Analizar(ctx context.Context, oferta modelos.OfertaLaboral)
 }
 
 // turno es un candidato en la fila de análisis; previo != nil indica que se reutiliza su análisis anterior.
+// version es la de las reglas que conserva quien se vuelve a analizar (0 = las vigentes).
 type turno struct {
-	c      *modelos.Candidato
-	previo *modelos.Candidato
+	c       *modelos.Candidato
+	previo  *modelos.Candidato
+	version int
 }
 
 // reutilizar da por bueno el análisis anterior de un candidato y lo informa como caché.
@@ -529,6 +551,12 @@ func (a *Analizador) motivoSinCache(c *modelos.Candidato) string {
 	if a.opts.Completo && ev.DescarteTemprano {
 		return "se descartó sin consultar todo y ahora se pide el análisis completo"
 	}
+	// Un descartado con dictamen es definitivo hasta que alguien le dé su segunda oportunidad (Descartados >
+	// Reanalizar, que además filtra a quien podría cambiar). Aunque le falten capturas o cédula —por ejemplo
+	// si los archivos ya no están en disco— no se vuelve a consultar solo en cada análisis ni en cada reinicio.
+	if EsDescartadoFirme(c) {
+		return ""
+	}
 	// Quien se descartó por una regla firme (género, edad...) no llegó a consultar ninguna fuente: no tiene
 	// capturas y, si no trae cédula, tampoco la tendrá. Volver a leerlo no cambia nada, y antes lo hacía en
 	// cada análisis y en cada reinicio.
@@ -547,7 +575,7 @@ func (a *Analizador) motivoSinCache(c *modelos.Candidato) string {
 
 func (a *Analizador) cacheValido(c *modelos.Candidato) bool { return a.motivoSinCache(c) == "" }
 
-func (a *Analizador) procesarSeguro(ctx context.Context, c *modelos.Candidato, carpetaOferta string, acum *acumuladorResultados) {
+func (a *Analizador) procesarSeguro(ctx context.Context, c *modelos.Candidato, version int, carpetaOferta string, acum *acumuladorResultados) {
 	defer func() {
 		if r := recover(); r != nil {
 			c.ErrorProceso = fmt.Sprintf("error inesperado: %v", r)
@@ -555,13 +583,25 @@ func (a *Analizador) procesarSeguro(ctx context.Context, c *modelos.Candidato, c
 			a.cerrarCandidato(c, carpetaOferta, acum)
 		}
 	}()
-	a.procesar(ctx, c, carpetaOferta, acum)
+	a.procesar(ctx, c, version, carpetaOferta, acum)
 }
 
-func (a *Analizador) procesar(ctx context.Context, c *modelos.Candidato, carpetaOferta string, acum *acumuladorResultados) {
+// procesar analiza a un candidato con las reglas de version (0 = las vigentes al empezar).
+func (a *Analizador) procesar(ctx context.Context, c *modelos.Candidato, version int, carpetaOferta string, acum *acumuladorResultados) {
 	carpetaCandidato := filepath.Join(carpetaOferta, fmt.Sprintf("%d_%s", c.Indice, agentes.LimpiarNombre(c.Nombre)))
 	_ = os.MkdirAll(carpetaCandidato, 0o755)
 	c.CarpetaCandidato = carpetaCandidato // aquí dejan sus capturas los agentes
+
+	// 0. Reglas: se fijan ahora y no cambian aunque se guarden parámetros nuevos a mitad del análisis.
+	if err := a.fijarReglas(ctx, c, version); err != nil {
+		if ctx.Err() != nil {
+			return
+		}
+		c.ErrorProceso = "no se pudieron leer las reglas de idoneidad"
+		a.dejarPendiente(c, carpetaOferta, acum, nil, []string{err.Error()})
+		return
+	}
+	reglas := c.Reglas
 
 	// 1. Perfil de Computrabajo + hoja de vida original
 	a.etapa(c, "perfil", estadoIniciada, "", 0)
@@ -590,20 +630,21 @@ func (a *Analizador) procesar(ctx context.Context, c *modelos.Candidato, carpeta
 	// 2. Género (sale del perfil; no cuesta ninguna consulta externa)
 	genero, origenGenero := a.determinarGenero(ctx, c)
 	c.Genero = genero
-	if genero == "Hombre" {
+	generoOK := reglas.AceptaGenero(genero)
+	if generoOK {
 		a.etapa(c, "genero", estadoOK, genero+origenGenero, 0)
 	} else {
-		a.etapa(c, "genero", estadoRechazado, fmt.Sprintf("Género (%s%s) no cumple requisito (requerido: Hombre)", genero, origenGenero), 0)
+		a.etapa(c, "genero", estadoRechazado, agentes.MotivoGenero(genero+origenGenero, reglas), 0)
 	}
 
-	simulada := genero == "Hombre" && a.opts.SimularSinCedula != nil && a.opts.SimularSinCedula(c.Nombre, c.Cedula)
+	simulada := generoOK && a.opts.SimularSinCedula != nil && a.opts.SimularSinCedula(c.Nombre, c.Cedula)
 	sinCedula := len(soloDigitos(c.Cedula)) < 6 || simulada
 
 	// Sin cédula en la ficha ni en la hoja de vida: antes de molestar al candidato se mira si la
 	// misma persona ya se postuló y la dejó. Esa cédula no se da por buena sin comprobar que
 	// ADRES la entrega a alguien con el mismo nombre.
 	verificarIdentidad := false
-	if sinCedula && genero == "Hombre" && !simulada { // la simulada no busca en otras postulaciones: debe pasar por el formulario
+	if sinCedula && generoOK && !simulada { // la simulada no busca en otras postulaciones: debe pasar por el formulario
 		if cedula := a.cedulaDePostulacionPrevia(c); cedula != "" {
 			c.Cedula, sinCedula, verificarIdentidad = cedula, false, true
 		}
@@ -611,14 +652,14 @@ func (a *Analizador) procesar(ctx context.Context, c *modelos.Candidato, carpeta
 
 	// La consulta completa no descarta, pero tampoco se le pide la cédula a quien las reglas ya
 	// excluyen: solo se pausa a quien pasaría el género.
-	if a.opts.Completo && !verificarIdentidad && !(sinCedula && genero == "Hombre") {
+	if a.opts.Completo && !verificarIdentidad && !(sinCedula && generoOK) {
 		a.analizarCompleto(ctx, c, carpetaOferta, acum)
 		return
 	}
 
 	// Descarte temprano: se corta en la primera regla que falla, de la más barata a la más cara.
-	if genero != "Hombre" {
-		a.descartar(c, carpetaOferta, acum, nil, fmt.Sprintf("Género (%s) no cumple requisito (requerido: Hombre)", genero))
+	if !generoOK {
+		a.descartar(c, carpetaOferta, acum, nil, agentes.MotivoGenero(genero, reglas))
 		return
 	}
 	if sinCedula {
@@ -630,14 +671,14 @@ func (a *Analizador) procesar(ctx context.Context, c *modelos.Candidato, carpeta
 	a.continuarDesdeCedula(ctx, c, carpetaOferta, acum, verificarIdentidad)
 }
 
-// continuarDesdeCedula aplica las reglas que dependen de la cédula (ADRES, RUNT y SIMIT, de la más
-// barata a la más cara, cortando en la primera que falla) y luego las consultas informativas. Es el
-// tramo que se reanuda cuando el candidato entrega la cédula que faltaba. verificarIdentidad pide
-// comprobar con ADRES que la cédula pertenece a quien dice el perfil.
+// continuarDesdeCedula aplica las reglas que dependen de la cédula y luego las consultas informativas. Lo que
+// descarta (edad mayor al tope, reintegro no aceptado, SIMIT por encima de $2.000.000) termina el análisis
+// sin gastar más consultas; lo que solo deja para semillero (edad menor a la mínima, EPS, RUNT, SIMIT hasta
+// $2.000.000) no lo detiene: se sigue hasta completar todo. Es el tramo que se reanuda cuando el candidato
+// entrega la cédula que faltaba. verificarIdentidad pide comprobar con ADRES que la cédula es de quien dice el perfil.
 func (a *Analizador) continuarDesdeCedula(ctx context.Context, c *modelos.Candidato, carpetaOferta string, acum *acumuladorResultados, verificarIdentidad bool) {
-	// La edad es la de la ficha de Computrabajo o la del formulario; el rango de contratación se revisa antes de
-	// gastar consultas en las fuentes.
-	if motivo := a.motivoEdad(c); motivo != "" {
+	// La edad es la de la ficha de Computrabajo o la del formulario: se revisa antes de gastar consultas.
+	if nivel, motivo := a.clasif.ReglasDe(c).NivelEdad(c.Edad); nivel == modelos.NivelDescarte {
 		a.descartar(c, carpetaOferta, acum, nil, motivo)
 		return
 	}
@@ -648,12 +689,12 @@ func (a *Analizador) continuarDesdeCedula(ctx context.Context, c *modelos.Candid
 	var pendientes []string
 	switch reintegro.estado {
 	case estadoRechazado:
-		// Ya trabajó aquí: no puede volver a entrar. Se termina con él sin gastar más consultas.
+		// Ya trabajó aquí y no se aceptan reintegros: se termina con él sin gastar más consultas.
 		c.ErrorProceso = ""
 		a.descartar(c, carpetaOferta, acum, nil, "Reintegro: "+reintegro.detalle)
 		return
 	case estadoError:
-		// No se pudo comprobar: se sigue con las demás reglas (un rechazo firme gana) y, si no, queda pendiente.
+		// No se pudo comprobar: se sigue con las demás reglas (un descarte gana) y, si no, queda pendiente.
 		c.ErrorProceso = "falló la consulta de REINTEGRO"
 		pendientes = append(pendientes, reintegro.detalle)
 	}
@@ -671,13 +712,14 @@ func (a *Analizador) continuarDesdeCedula(ctx context.Context, c *modelos.Candid
 			}
 		}
 		switch r.estado {
-		case estadoOK:
+		case estadoOK, estadoSemillero:
+			// Semillero: no cumple esta regla, pero la búsqueda sigue con las demás.
 		case estadoError:
 			// No hay evidencia ni a favor ni en contra: se sigue con las demás reglas y se deja pendiente.
 			c.ErrorProceso = "falló la consulta de " + strings.ToUpper(e.nombre)
 			pendientes = append(pendientes, r.detalle)
 		default:
-			// Rechazo firme: aunque otra consulta haya fallado, el candidato ya no cumple.
+			// Descarte: aunque otra consulta haya fallado, el candidato ya no cumple.
 			c.ErrorProceso = ""
 			a.descartar(c, carpetaOferta, acum, hechas, r.detalle)
 			return
@@ -688,7 +730,7 @@ func (a *Analizador) continuarDesdeCedula(ctx context.Context, c *modelos.Candid
 		return
 	}
 
-	// Cumple las cuatro reglas: ahora sí las consultas informativas.
+	// Reclutado o semillero: las consultas informativas, que pueden descartarlo por incidentes.
 	a.correrParalelo(ctx, c, a.etapasInformativas())
 	if ctx.Err() != nil {
 		return
@@ -709,24 +751,22 @@ func (a *Analizador) analizarCompleto(ctx context.Context, c *modelos.Candidato,
 	if ctx.Err() != nil {
 		return
 	}
-	rechazo := c.Genero != "Hombre" || reintegro.estado == estadoRechazado
+	if reintegro.estado == estadoError {
+		c.ErrorProceso = "falló la consulta de REINTEGRO"
+	}
 	for _, e := range a.etapasNucleo() {
-		switch estado, _, _ := e.evaluar(c); estado {
-		case estadoError:
+		if estado, _, _ := e.evaluar(c); estado == estadoError {
 			c.ErrorProceso = "falló la consulta de " + strings.ToUpper(e.nombre)
-		case estadoRechazado:
-			rechazo = true
 		}
 	}
-	ev := a.clasif.Evaluar(c)
-	if reintegro.estado == estadoRechazado {
+	ev := a.clasif.Evaluar(c) // también descarta por reintegro, edad, incidentes y SIMIT
+	switch {
+	case ev.Clasificacion == modelos.ClasificacionDescartado:
+		c.ErrorProceso = "" // hay un descarte firme: reintentar no cambia el resultado
+	case c.ErrorProceso != "":
+		// Sin poder comprobarlo todo no hay clasificación: queda pendiente y se reintenta.
 		ev.EsApto, c.EsApto = false, false
-		ev.MotivosDescarte = append(ev.MotivosDescarte, "Reintegro: "+reintegro.detalle)
-	}
-	if rechazo {
-		c.ErrorProceso = "" // hay un rechazo firme: reintentar no cambia el resultado
-	} else if !ev.EsApto && c.ErrorProceso != "" {
-		ev.VerificacionPendiente = true
+		ev.VerificacionPendiente, ev.Clasificacion, ev.Semillero = true, "", nil
 	}
 	a.evaluarConIA(ctx, c)
 	a.cerrarCandidato(c, carpetaOferta, acum)
@@ -818,12 +858,28 @@ func (a *Analizador) cerrarSinAptitud(c *modelos.Candidato, carpetaOferta string
 	cumpleSimit, detSimit := detalle("simit")
 	cumpleEPS, detEPS := detalle("adres")
 
+	// Lo que ya había quedado para semillero se conserva junto al motivo del descarte.
+	clasificacion := modelos.ClasificacionDescartado
+	var semillero []string
+	if pendiente {
+		clasificacion = ""
+	} else {
+		if nivel, motivo := a.clasif.ReglasDe(c).NivelEdad(c.Edad); nivel == modelos.NivelSemillero {
+			semillero, motivos = append(semillero, "edad"), append(motivos, motivo)
+		}
+		for _, nombre := range []string{"adres", "runt", "simit"} {
+			if r, ok := hechas[nombre]; ok && r.estado == estadoSemillero {
+				semillero, motivos = append(semillero, nombre), append(motivos, r.detalle)
+			}
+		}
+	}
+
 	c.Genero = genero
 	c.EsApto = false
 	c.EvaluacionIdoneidad = &modelos.EvaluacionIdoneidad{
 		EsApto:                false,
 		Genero:                genero,
-		CumpleGenero:          genero == "Hombre",
+		CumpleGenero:          a.clasif.ReglasDe(c).AceptaGenero(genero),
 		CumpleEPS:             cumpleEPS,
 		DetalleEPS:            detEPS,
 		CumpleRunt:            cumpleRunt,
@@ -833,6 +889,8 @@ func (a *Analizador) cerrarSinAptitud(c *modelos.Candidato, carpetaOferta string
 		MotivosDescarte:       motivos,
 		DescarteTemprano:      !pendiente,
 		VerificacionPendiente: pendiente,
+		Clasificacion:         clasificacion,
+		Semillero:             semillero,
 	}
 	a.cerrarCandidato(c, carpetaOferta, acum)
 }
@@ -844,6 +902,9 @@ func (a *Analizador) cerrarSinAptitud(c *modelos.Candidato, carpetaOferta string
 func (a *Analizador) cerrarCandidato(c *modelos.Candidato, carpetaOferta string, acum *acumuladorResultados) {
 	if c.EvaluacionIdoneidad != nil {
 		c.EsApto = c.EvaluacionIdoneidad.EsApto
+		if c.Reglas != nil {
+			c.EvaluacionIdoneidad.ReglaVersion = c.Reglas.Version // se guarda y se muestra con su dictamen
+		}
 	}
 	acum.agregar(c)
 	a.contar(func(r *ResumenAnalisis) {
@@ -852,6 +913,9 @@ func (a *Analizador) cerrarCandidato(c *modelos.Candidato, carpetaOferta string,
 			r.Aptos++
 		} else {
 			r.NoAptos++
+		}
+		if c.EvaluacionIdoneidad != nil && c.EvaluacionIdoneidad.Clasificacion == modelos.ClasificacionSemillero {
+			r.Semilleros++
 		}
 		if c.ErrorProceso != "" {
 			r.Errores++
@@ -909,16 +973,4 @@ func soloDigitos(texto string) string {
 		}
 	}
 	return b.String()
-}
-
-// motivoEdad devuelve por qué la edad declarada queda fuera del rango de contratación, o "" si cumple
-// o no se conoce (no se inventa una edad).
-func (a *Analizador) motivoEdad(c *modelos.Candidato) string {
-	if a.cfg == nil || c.Edad <= 0 {
-		return ""
-	}
-	if c.Edad < a.cfg.EdadMinimaContratacion || c.Edad > a.cfg.EdadMaximaContratacion {
-		return fmt.Sprintf("Edad (%d años) fuera del rango de contratación (%d a %d años)", c.Edad, a.cfg.EdadMinimaContratacion, a.cfg.EdadMaximaContratacion)
-	}
-	return ""
 }

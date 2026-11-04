@@ -94,6 +94,7 @@ type ControladorRRHH struct {
 	solicitudes solicitudesPublicas
 	envios      enviosBase
 	trabajos    trabajosBase
+	reanalisis  reanalisisBase // segunda oportunidad a los descartados
 	historiales historialBase
 	limite      *limitadorIP  // límite de peticiones por dirección en las rutas públicas
 	despertar   chan struct{} // avisa al trabajador de segundo plano
@@ -101,6 +102,7 @@ type ControladorRRHH struct {
 
 	// Inicio de sesión (nil sin base de datos: la API queda abierta). Ver autenticacion.go.
 	sesiones       sesionesBase
+	parametros     parametrosBase // parámetros de aceptación (parametros.go)
 	sesionesVistas sesionesVistas // sesiones ya validadas, por unos segundos (autenticacion.go)
 	limiteLogin    *limitadorIP
 }
@@ -157,6 +159,12 @@ func (c *ControladorRRHH) ConBase(b Base) {
 	c.solicitudes, c.envios, c.trabajos, c.historiales = b, b, b, b
 	if s, ok := b.(sesionesBase); ok {
 		c.sesiones = s
+	}
+	if pb, ok := b.(parametrosBase); ok {
+		c.parametros = pb
+	}
+	if rb, ok := b.(reanalisisBase); ok {
+		c.reanalisis = rb
 	}
 	c.iniciarSegundoPlano()
 }

@@ -82,6 +82,12 @@ func tipoMotivo(motivo string, ev *modelos.EvaluacionIdoneidad) string {
 		return "genero"
 	case strings.HasPrefix(motivo, "Cédula"):
 		return "cedula"
+	case strings.HasPrefix(motivo, "Edad"):
+		return "edad"
+	case strings.HasPrefix(motivo, "Reintegro"):
+		return "reintegro"
+	case strings.HasPrefix(motivo, "Incidente"):
+		return "incidente"
 	case motivo == ev.DetalleEPS:
 		return "eps"
 	case motivo == ev.DetalleRunt:
@@ -194,6 +200,12 @@ func (a *Almacen) guardar(ctx context.Context, oferta modelos.OfertaLaboral, c *
 		}
 	}
 	etapa, dictamen, pendiente := estadoPostulacion(c)
+	var clasificacion sql.NullString // reclutado_p1, semillero o descartado; NULL sin dictamen
+	semillero := sql.NullString{}
+	if ev != nil && ev.Clasificacion != "" {
+		clasificacion = sql.NullString{String: ev.Clasificacion, Valid: true}
+		semillero = sql.NullString{String: jsonLista(ev.Semillero), Valid: true}
+	}
 
 	creada := false
 	var postulacionFinal []byte
@@ -226,9 +238,9 @@ func (a *Almacen) guardar(ctx context.Context, oferta modelos.OfertaLaboral, c *
 		switch {
 		case err == nil:
 			if err := exec(ctx, tx,
-				`UPDATE postulaciones SET etapa_actual = ?, dictamen = ?, activa = 1, verificacion_pendiente = ?, error_proceso = ?,
-				   actualizado_en = ? WHERE id = ?`,
-				etapa, dictamen, pendiente, texto(c.ErrorProceso, 255), momento, postulacion); err != nil {
+				`UPDATE postulaciones SET etapa_actual = ?, dictamen = ?, clasificacion = ?, activa = 1, verificacion_pendiente = ?,
+				   error_proceso = ?, actualizado_en = ? WHERE id = ?`,
+				etapa, dictamen, clasificacion, pendiente, texto(c.ErrorProceso, 255), momento, postulacion); err != nil {
 				return err
 			}
 			if mejorarLegado {
@@ -239,10 +251,10 @@ func (a *Almacen) guardar(ctx context.Context, oferta modelos.OfertaLaboral, c *
 		case errors.Is(err, sql.ErrNoRows):
 			creada = true
 			if err := exec(ctx, tx,
-				`INSERT INTO postulaciones (id, persona_id, oferta_id, trabajo_id, etapa_actual, dictamen, activa,
+				`INSERT INTO postulaciones (id, persona_id, oferta_id, trabajo_id, etapa_actual, dictamen, clasificacion, activa,
 				   verificacion_pendiente, error_proceso, creado_en, actualizado_en)
-				 VALUES (?,?,?,NULL,?,?,1,?,?,?,?)`,
-				postulacion, persona, ofertaID, etapa, dictamen, pendiente, texto(c.ErrorProceso, 255), momento, momento); err != nil {
+				 VALUES (?,?,?,NULL,?,?,?,1,?,?,?,?)`,
+				postulacion, persona, ofertaID, etapa, dictamen, clasificacion, pendiente, texto(c.ErrorProceso, 255), momento, momento); err != nil {
 				return err
 			}
 		default:
@@ -320,19 +332,23 @@ func (a *Almacen) guardar(ctx context.Context, oferta modelos.OfertaLaboral, c *
 
 		// 5. Evaluación de idoneidad: la nueva pasa a ser la vigente y la anterior queda en el historial.
 		if ev != nil {
+			reglaID, err := a.reglaDeVersion(ctx, tx, ev.ReglaVersion)
+			if err != nil {
+				return err
+			}
 			if err := exec(ctx, tx, `UPDATE evaluaciones_idoneidad SET vigente = 0 WHERE postulacion_id = ? AND vigente = 1`, postulacion); err != nil {
 				return err
 			}
 			if err := exec(ctx, tx,
 				`INSERT INTO evaluaciones_idoneidad (id, postulacion_id, regla_version_id, trabajo_id, es_apto, genero, cumple_genero,
 				   cumple_eps, cumple_runt, cumple_simit, detalle_eps, detalle_runt, detalle_simit,
-				   descarte_temprano, verificacion_pendiente, vigente, evaluado_en)
-				 VALUES (?,?,?,NULL,?,?,?,?,?,?,?,?,?,?,?,1,?)`,
-				evaluacionID, postulacion, a.reglaID, ev.EsApto, texto(ev.Genero, 30), nullBool(ev.CumpleGenero),
+				   descarte_temprano, verificacion_pendiente, vigente, evaluado_en, clasificacion, semillero)
+				 VALUES (?,?,?,NULL,?,?,?,?,?,?,?,?,?,?,?,1,?,?,?)`,
+				evaluacionID, postulacion, reglaID, ev.EsApto, texto(ev.Genero, 30), nullBool(ev.CumpleGenero),
 				triEstado(ev.CumpleEPS, ev.DetalleEPS), triEstado(ev.CumpleRunt, ev.DetalleRunt),
 				triEstado(ev.CumpleSimit, ev.DetalleSimit),
 				texto(ev.DetalleEPS, 16000), texto(ev.DetalleRunt, 16000), texto(ev.DetalleSimit, 16000),
-				ev.DescarteTemprano, ev.VerificacionPendiente, momento); err != nil {
+				ev.DescarteTemprano, ev.VerificacionPendiente, momento, clasificacion, semillero); err != nil {
 				return err
 			}
 			for _, m := range ev.MotivosDescarte {

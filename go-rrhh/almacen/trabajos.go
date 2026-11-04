@@ -11,6 +11,10 @@ import (
 // tipoReanudar es el tipo de trabajo que continúa el análisis de un candidato cuando entrega sus datos.
 const tipoReanudar = "reanudar_postulacion"
 
+// OrigenReanalisis marca las reanudaciones que dan una segunda oportunidad a un descartado con los
+// parámetros vigentes (las demás vienen del formulario de datos faltantes).
+const OrigenReanalisis = "reanalisis"
+
 // maxIntentosReanudar son las veces que se intenta una reanudación antes de darla por fallida.
 const maxIntentosReanudar = 3
 
@@ -18,16 +22,20 @@ const maxIntentosReanudar = 3
 const esperaReintento = 2 * time.Minute
 
 // encolarReanudacion agrega el trabajo que continuará el análisis del candidato, en la misma
-// transacción que guarda sus datos: o se guardan los dos o ninguno.
-func (a *Almacen) encolarReanudacion(ctx context.Context, tx *sql.Tx, trabajo, ofertaID, postulacion []byte, ahora time.Time) error {
-	opciones, err := json.Marshal(map[string]string{"postulacion_id": idTexto(postulacion)})
+// transacción que guarda sus datos: o se guardan los dos o ninguno. origen es "" (formulario) u OrigenReanalisis.
+func (a *Almacen) encolarReanudacion(ctx context.Context, tx *sql.Tx, trabajo, ofertaID, postulacion []byte, ahora time.Time, origen string) error {
+	datos := map[string]string{"postulacion_id": idTexto(postulacion)}
+	if origen != "" {
+		datos["origen"] = origen
+	}
+	opciones, err := json.Marshal(datos)
 	if err != nil {
 		return err
 	}
 	return exec(ctx, tx,
 		`INSERT INTO trabajos (id, tipo, oferta_id, regla_version_id, opciones, estado, cancelar, intentos, creado_en, actualizado_en)
 		 VALUES (?,?,?,?,?, 'pendiente', 0, 0, ?, ?)`,
-		trabajo, tipoReanudar, ofertaID, a.reglaID, string(opciones), ahora, ahora)
+		trabajo, tipoReanudar, ofertaID, a.reglaVigente(), string(opciones), ahora, ahora)
 }
 
 // TrabajoReanudacion es una reanudación pendiente que el trabajador reclamó.
@@ -35,6 +43,7 @@ type TrabajoReanudacion struct {
 	ID            []byte
 	PostulacionID string
 	Intentos      int
+	Origen        string // "" (formulario) u OrigenReanalisis
 }
 
 // ReclamarReanudacion toma la reanudación pendiente más antigua y la reserva por lease. Devuelve
@@ -65,12 +74,13 @@ func (a *Almacen) ReclamarReanudacion(ctx context.Context, trabajador string, le
 	}
 	var o struct {
 		PostulacionID string `json:"postulacion_id"`
+		Origen        string `json:"origen"`
 	}
 	if err := json.Unmarshal([]byte(opciones), &o); err != nil || o.PostulacionID == "" {
 		_ = a.TerminarReanudacion(ctx, &TrabajoReanudacion{ID: id, Intentos: maxIntentosReanudar}, fmt.Errorf("trabajo sin postulación"))
 		return nil, nil
 	}
-	return &TrabajoReanudacion{ID: id, PostulacionID: o.PostulacionID, Intentos: intentos + 1}, nil
+	return &TrabajoReanudacion{ID: id, PostulacionID: o.PostulacionID, Intentos: intentos + 1, Origen: o.Origen}, nil
 }
 
 // TerminarReanudacion cierra el trabajo: completado si fallo es nil. Si falló y quedan intentos

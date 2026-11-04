@@ -671,7 +671,7 @@ func (a *Almacen) CompletarSolicitud(ctx context.Context, token string, d DatosC
 			modelos.EstadoDatosRecibidos, ahora, postulacion); err != nil {
 			return err
 		}
-		return a.encolarReanudacion(ctx, tx, trabajo, ofertaID, postulacion, ahora)
+		return a.encolarReanudacion(ctx, tx, trabajo, ofertaID, postulacion, ahora, "")
 	})
 	if err != nil {
 		return err

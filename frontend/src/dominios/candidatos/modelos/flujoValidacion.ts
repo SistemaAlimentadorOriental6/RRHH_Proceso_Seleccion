@@ -4,6 +4,8 @@ export type EstadoNodoValidacion =
   | 'reintentando'
   | 'completado'
   | 'detenido_error'
+  /** No cumple la regla pero queda para semillero: el flujo sigue (azul). */
+  | 'semillero'
   | 'omitido';
 
 export type ModoSimulacionNodo =

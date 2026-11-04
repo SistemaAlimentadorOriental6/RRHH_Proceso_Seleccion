@@ -11,11 +11,18 @@
     UserIcon,
     Logout01Icon,
     WorkflowSquare10Icon,
+    Settings02Icon,
   } from "@hugeicons/core-free-icons";
   import {
     GRUPOS_NAVEGACION_SIDEBAR,
     type SubItemNavegacion,
   } from "../../configuracion/navegacion.config";
+
+  import { onMount } from "svelte";
+  import {
+    almacenRrhh,
+    veredictoDe,
+  } from "../../../dominios/candidatos/servicios/almacenAnalisis.svelte";
 
   interface Propiedades {
     rutaActiva: string;
@@ -37,14 +44,47 @@
   let gruposAbiertos = $state<Record<string, boolean>>({
     candidatos: true,
     reclutamiento: true,
+    configuracion: true,
   });
   let menuUsuarioAbierto = $state(false);
 
+  onMount(() => {
+    void almacenRrhh.asegurarVacantes();
+  });
+
+  // Las sesiones se refrescan solas con los avisos del backend, así que el conteo se mantiene al día.
+  // Los totales salen de la base (resumen de cada vacante, se relee con cada aviso del backend), sin cargar
+  // a todos los candidatos. Si la vacante ya tiene candidatos en memoria (abierta o analizando en vivo),
+  // se cuentan ahí, que está más al día.
+  const conteos = $derived.by(() => {
+    const total: Record<string, number> = { "validacion-logs": 0, semillero: 0, pendientes: 0, descartados: 0 };
+    for (const v of almacenRrhh.vacantes) {
+      const completos = almacenRrhh.sesion(v.id).candidatos.filter((c) => c.fase === "completo");
+      if (completos.length === 0 && v.resumen) {
+        total["validacion-logs"] += v.resumen.aptos;
+        total.semillero += v.resumen.semilleros ?? 0;
+        total.pendientes += v.resumen.pendientes;
+        total.descartados += v.resumen.no_aptos;
+        continue;
+      }
+      for (const c of completos) {
+        const veredicto = veredictoDe(c);
+        if (veredicto === "apto") total["validacion-logs"]++;
+        else if (veredicto === "semillero") total.semillero++;
+        else if (veredicto === "pendiente") total.pendientes++;
+        else if (veredicto === "no_apto") total.descartados++;
+      }
+    }
+    return total;
+  });
+
   function obtenerIconoGrupo(clave: string) {
+    if (clave === "configuracion") return Settings02Icon;
     return clave === "reclutamiento" ? Briefcase01Icon : UserGroupIcon;
   }
 
   function obtenerIconoSubItem(clave?: string) {
+    if (clave === "configuracion") return Settings02Icon;
     return clave === "ia" ? SparklesIcon : WorkflowSquare10Icon;
   }
 
@@ -160,6 +200,9 @@
                     />
                   </span>
                   <span class="texto-subitem">{subItem.etiqueta}</span>
+                  {#if subItem.id in conteos}
+                    <span class="contador-subitem">{conteos[subItem.id]}</span>
+                  {/if}
                 </button>
               {/each}
             </div>
@@ -452,6 +495,23 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+
+  .contador-subitem {
+    margin-left: auto;
+    min-width: 20px;
+    padding: 1px 6px;
+    border-radius: 999px;
+    background-color: var(--color-fondo-soft);
+    font-size: 10px;
+    font-weight: 700;
+    text-align: center;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .item-submenu.item-activo .contador-subitem {
+    background-color: var(--color-primario);
+    color: #ffffff;
   }
 
   .contenedor-inferior {

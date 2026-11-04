@@ -1,7 +1,11 @@
 /**
  * Adi lleva las tarjetas: agarra la tarjeta de quien terminó, la comprime, la carga hasta su destino
- * y la suelta ahí. Hay dos destinos:
+ * y la suelta ahí. Hay tres destinos:
  *  - "descartar": la entrada "Descartados" de la barra lateral (la tarjeta se achica dentro de ella);
+ *  - "rescatar": igual, pero hacia "Reclutamiento" o "Semillero": un descartado que con los parámetros
+ *    nuevos ya cumple (Adi va feliz);
+ *  - "semillero": igual, hacia "Semillero": alguien recién analizado que no cumple alguna regla pero no se
+ *    descarta;
  *  - "analizar": el lugar de la tarjeta en la sección Analizados (la copia crece hasta encajar en él).
  * La tarjeta no se mueve sola: su copia sigue a Adi en cada cuadro (quien llama a `actualizar` es el
  * bucle de movimiento del avatar), así el recorrido siempre se completa y va a su ritmo.
@@ -10,7 +14,7 @@
 import { SvelteSet } from 'svelte/reactivity';
 
 type Fase = 'agarrando' | 'llevando' | 'soltando' | 'listo';
-export type ModoLlevar = 'descartar' | 'analizar';
+export type ModoLlevar = 'descartar' | 'rescatar' | 'semillero' | 'pendiente' | 'analizar';
 export type ResultadoLlevar = 'iniciado' | 'ocupado' | 'sin-animacion';
 
 interface Vuelo {
@@ -50,7 +54,7 @@ const ESCALA_SUJETA = 0.2;
 const COLGAR = { x: -26, y: 42 };
 const MS_AGARRAR = 700;
 const MS_SOLTAR = 550;
-const MS_LISTO: Record<ModoLlevar, number> = { descartar: 1200, analizar: 700 };
+const MS_LISTO: Record<ModoLlevar, number> = { descartar: 1200, rescatar: 1600, semillero: 1200, pendiente: 1200, analizar: 700 };
 const MS_MAXIMO_LLEVAR = 9000;
 
 let actual: Vuelo | null = null;
@@ -61,8 +65,11 @@ const salida = (t: number) => 1 - (1 - t) ** 3; // cubic out
 const rebote = (t: number) => 1 + 2.2 * (t - 1) ** 3 + 1.2 * (t - 1) ** 2; // back out
 
 /** La entrada "Descartados" del menú (o, si no se ve, la barra lateral entera). */
-export const destinoDescartados = (): HTMLElement | null =>
-  document.querySelector<HTMLElement>('[data-nav="descartados"]') ?? document.querySelector<HTMLElement>('aside.barra-lateral');
+export const destinoDescartados = (): HTMLElement | null => destinoMenu('descartados');
+
+/** Una entrada del menú lateral por su id (validacion-logs, semillero, descartados) o la barra entera. */
+export const destinoMenu = (id: string): HTMLElement | null =>
+  document.querySelector<HTMLElement>(`[data-nav="${id}"]`) ?? document.querySelector<HTMLElement>('aside.barra-lateral');
 
 /**
  * Empieza a llevar una tarjeta. 'ocupado' si Adi ya lleva otra (quien llama reintenta); 'sin-animacion'
@@ -75,7 +82,7 @@ export function llevarTarjeta(
   alLlegar?: () => void
 ): ResultadoLlevar {
   if (actual) return 'ocupado';
-  if (!destinoEl() && modo === 'descartar') return 'sin-animacion';
+  if (!destinoEl() && modo !== 'analizar') return 'sin-animacion';
   if (matchMedia('(prefers-reduced-motion: reduce)').matches) return 'sin-animacion';
 
   const r = tarjeta.getBoundingClientRect();
@@ -198,7 +205,7 @@ export function actualizar(t: number, kirby: { cx: number; cy: number; vx: numbe
   const p = Math.min(1, en / MS_SOLTAR);
   const e = salida(p);
   const d = rectDestino();
-  if (actual.modo === 'descartar' || !d) {
+  if (actual.modo !== 'analizar' || !d) {
     // Se achica hasta desaparecer dentro de la entrada del menú.
     const cx = d ? d.left + d.width / 2 : actual.sujeta.cx;
     const cy = d ? d.top + d.height / 2 : actual.sujeta.cy;
@@ -225,10 +232,10 @@ function soltada(t: number): void {
   avisarLlegada();
   const destino = actual.destinoEl();
   destino?.animate(
-    modo === 'descartar'
+    modo !== 'analizar'
       ? [{ transform: 'scale(1)' }, { transform: 'scale(1.1)' }, { transform: 'scale(0.97)' }, { transform: 'scale(1)' }]
       : [{ transform: 'scale(0.98)' }, { transform: 'scale(1.025)' }, { transform: 'scale(1)' }],
-    { duration: modo === 'descartar' ? 520 : 400, easing: 'ease-out' }
+    { duration: modo !== 'analizar' ? 520 : 400, easing: 'ease-out' }
   );
   cambiarFase('listo', t);
 }

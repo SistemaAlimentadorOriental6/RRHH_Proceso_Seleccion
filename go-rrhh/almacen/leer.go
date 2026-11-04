@@ -19,6 +19,7 @@ type OfertaProcesada struct {
 	Titulo, Slug   string
 	Total, Aptos   int
 	Pendientes     int // no aptos con verificación pendiente
+	Semilleros     int // no aptos clasificados como semillero
 	ActualizadoEn  time.Time
 }
 
@@ -28,6 +29,7 @@ func (a *Almacen) OfertasProcesadas(ctx context.Context) ([]OfertaProcesada, err
 		`SELECT o.id_computrabajo, o.titulo, o.slug, COUNT(*), COALESCE(SUM(po.dictamen = 'apto'), 0),
 		        COALESCE(SUM(po.dictamen <> 'apto' AND EXISTS (SELECT 1 FROM evaluaciones_idoneidad ev
 		                  WHERE ev.postulacion_id = po.id AND ev.vigente = 1 AND ev.verificacion_pendiente = 1)), 0),
+		        COALESCE(SUM(po.clasificacion = 'semillero'), 0),
 		        MAX(po.actualizado_en)
 		   FROM ofertas o JOIN postulaciones po ON po.oferta_id = o.id AND po.activa = 1
 		  GROUP BY o.id, o.id_computrabajo, o.titulo, o.slug`)
@@ -40,7 +42,7 @@ func (a *Almacen) OfertasProcesadas(ctx context.Context) ([]OfertaProcesada, err
 	for filas.Next() {
 		var o OfertaProcesada
 		var actualizado sql.NullTime
-		if err := filas.Scan(&o.IDComputrabajo, &o.Titulo, &o.Slug, &o.Total, &o.Aptos, &o.Pendientes, &actualizado); err != nil {
+		if err := filas.Scan(&o.IDComputrabajo, &o.Titulo, &o.Slug, &o.Total, &o.Aptos, &o.Pendientes, &o.Semilleros, &actualizado); err != nil {
 			return nil, err
 		}
 		o.ActualizadoEn = actualizado.Time
@@ -155,10 +157,11 @@ type filaCandidato struct {
 	dictamen, etapa                                   string
 	errorProceso, nombre, genero                      sql.NullString
 	urlDetalle, urlCV, urlFoto                        sql.NullString
-	indice, edadFicha                                 sql.NullInt64
+	indice, edadFicha, reglaVersion                   sql.NullInt64
 	evEsApto, cumpleGenero, cumpleEPS                 sql.NullBool
 	cumpleRunt, cumpleSimit, descarte, verifPendiente sql.NullBool
 	evGenero, detalleEPS, detalleRunt, detalleSimit   sql.NullString
+	clasificacion, semillero                          sql.NullString
 }
 
 // candidatosDe reconstruye a los candidatos de una vacante.
@@ -181,7 +184,9 @@ func (a *Almacen) candidatosDonde(ctx context.Context, conTexto bool, cond strin
 		          WHERE dd.postulacion_id = po.id ORDER BY dd.id DESC LIMIT 1),
 		        pf.indice, pf.edad, pf.nombre, pf.genero_inferido, pf.url_detalle, pf.url_cv, pf.url_foto,
 		        ev.id, ev.es_apto, ev.genero, ev.cumple_genero, ev.cumple_eps, ev.cumple_runt, ev.cumple_simit,
-		        ev.detalle_eps, ev.detalle_runt, ev.detalle_simit, ev.descarte_temprano, ev.verificacion_pendiente
+		        ev.detalle_eps, ev.detalle_runt, ev.detalle_simit, ev.descarte_temprano, ev.verificacion_pendiente,
+		        (SELECT r.version FROM reglas_idoneidad r WHERE r.id = ev.regla_version_id),
+		        ev.clasificacion, ev.semillero
 		   FROM postulaciones po
 		   JOIN personas pe ON pe.id = po.persona_id
 		   LEFT JOIN perfiles pf ON pf.postulacion_id = po.id
@@ -201,7 +206,7 @@ func (a *Almacen) candidatosDonde(ctx context.Context, conTexto bool, cond strin
 		if err := filas.Scan(&f.postulacion, &f.dictamen, &f.etapa, &f.errorProceso, &f.cedulaCifrada, &f.nacimientoCifrado,
 			&f.indice, &f.edadFicha, &f.nombre, &f.genero, &f.urlDetalle, &f.urlCV, &f.urlFoto,
 			&f.evaluacionID, &f.evEsApto, &f.evGenero, &f.cumpleGenero, &f.cumpleEPS, &f.cumpleRunt, &f.cumpleSimit,
-			&f.detalleEPS, &f.detalleRunt, &f.detalleSimit, &f.descarte, &f.verifPendiente); err != nil {
+			&f.detalleEPS, &f.detalleRunt, &f.detalleSimit, &f.descarte, &f.verifPendiente, &f.reglaVersion, &f.clasificacion, &f.semillero); err != nil {
 			return nil, err
 		}
 		c, err := a.armarCandidato(f)
@@ -373,6 +378,11 @@ func (a *Almacen) armarCandidato(f filaCandidato) (modelos.Candidato, error) {
 			DetalleSimit:          f.detalleSimit.String,
 			DescarteTemprano:      f.descarte.Bool,
 			VerificacionPendiente: f.verifPendiente.Bool,
+			ReglaVersion:          int(f.reglaVersion.Int64),
+			Clasificacion:         f.clasificacion.String,
+		}
+		if f.semillero.Valid {
+			_ = json.Unmarshal([]byte(f.semillero.String), &ev.Semillero) // un JSON dañado solo pierde el detalle azul
 		}
 		c.EvaluacionIdoneidad = ev
 		// EsApto sale del dictamen (arriba), igual que los totales de OfertasProcesadas: si saliera de la

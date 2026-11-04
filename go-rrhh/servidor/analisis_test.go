@@ -154,13 +154,18 @@ func TestAnalisisSSEDescarteTemprano(t *testing.T) {
 		!strings.Contains(maria.EvaluacionIdoneidad.MotivosDescarte[0], "Género") {
 		t.Errorf("María debía descartarse por género sin consultas: %+v", maria.EvaluacionIdoneidad)
 	}
-	if juan.EsApto || juan.EvaluacionIdoneidad == nil || !strings.Contains(juan.EvaluacionIdoneidad.MotivosDescarte[0], "C2 o C3") {
-		t.Errorf("Juan debía descartarse por licencia: %+v", juan.EvaluacionIdoneidad)
+	if juan.EsApto || juan.EvaluacionIdoneidad == nil || juan.EvaluacionIdoneidad.Clasificacion != modelos.ClasificacionSemillero ||
+		!strings.Contains(juan.EvaluacionIdoneidad.MotivosDescarte[0], "C2 o C3") {
+		t.Errorf("Juan debía quedar para semillero por licencia: %+v", juan.EvaluacionIdoneidad)
 	}
-	// Descarte temprano: la EPS (ADRES) va primero y se consulta solo para los hombres (2); RUNT solo para
-	// quien pasó la EPS (2) y SIMIT solo para quien pasó RUNT (1).
-	if llamadasAdres.Load() != 2 || llamadasRunt.Load() != 2 || llamadasSimit.Load() != 1 {
-		t.Errorf("consultas adres=%d runt=%d simit=%d (esperado 2/2/1)", llamadasAdres.Load(), llamadasRunt.Load(), llamadasSimit.Load())
+	if carlos.EvaluacionIdoneidad == nil || carlos.EvaluacionIdoneidad.Clasificacion != modelos.ClasificacionReclutadoP1 ||
+		maria.EvaluacionIdoneidad.Clasificacion != modelos.ClasificacionDescartado {
+		t.Errorf("clasificaciones: Carlos %+v, María %+v", carlos.EvaluacionIdoneidad, maria.EvaluacionIdoneidad)
+	}
+	// El género descarta sin consultas (María no gasta ninguna). Lo que solo deja para semillero (la licencia
+	// de Juan) no detiene la búsqueda: los dos hombres pasan por ADRES, RUNT y SIMIT.
+	if llamadasAdres.Load() != 2 || llamadasRunt.Load() != 2 || llamadasSimit.Load() != 2 {
+		t.Errorf("consultas adres=%d runt=%d simit=%d (esperado 2/2/2)", llamadasAdres.Load(), llamadasRunt.Load(), llamadasSimit.Load())
 	}
 
 	// Reconectar con el último id: ya recibió todo, 204 para que EventSource no reintente.

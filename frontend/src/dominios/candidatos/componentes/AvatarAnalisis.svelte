@@ -12,11 +12,11 @@
 
   interface Propiedades {
     sesion: { activo: boolean; estado: string; candidatos: CandidatoEnVivo[]; repitiendo?: boolean };
+    /** Color del cuerpo: el de la pantalla donde está (rojo en Descartados, azul en Semillero). */
+    color?: string;
   }
-  let { sesion }: Propiedades = $props();
-
-  // Cuerpo en el verde de la app (--vs-primary-raw en app.css) y ojos blancos.
-  const definicion = { ...kirby, colors: { ...kirby.colors, body: "#4cc253", eyes: "#ffffff" } };
+  // Por defecto, el verde de la app (--vs-primary-raw en app.css); los ojos siempre blancos.
+  let { sesion, color = "#4cc253" }: Propiedades = $props();
   const TAM = 72;
 
   // Qué hace, y qué piensa de vez en cuando, mientras una etapa del flujo está corriendo.
@@ -76,6 +76,21 @@
   const A_ANALIZADOS = ["Este ya está listo: lo paso a Analizados", "Lo llevo a Analizados", "Listo, a su lugar en Analizados"];
   const LLEGUE_DESCARTADOS = ["¡Listo!", "Entregado en Descartados", "Ahí queda"];
   const LLEGUE_ANALIZADOS = ["¡Ya está en Analizados!", "Dejado en su lugar", "Aquí queda, bien acomodado"];
+  // Un descartado que con los parámetros nuevos ya cumple: Adi se lo lleva feliz.
+  const RESCATE = [
+    "¡Y yo que pensaba que había perdido la fe en ti!",
+    "¡Saliste del lado oscuro!",
+    "¡Segunda oportunidad bien aprovechada!",
+    "¡Sabía que tenías algo bueno!",
+    "¡Te salvaste! Ya no estás descartado",
+    "¡Volviste de entre los descartados!",
+    "¡Bienvenido de vuelta al proceso!",
+  ];
+  const A_SEMILLERO = ["Este va al semillero, para más adelante", "Aún no, pero tiene futuro: al semillero", "Lo guardo en el semillero"];
+  const A_PENDIENTES = ["A este le falta confirmar algo: a Pendientes", "Quedó por verificar: lo llevo a Pendientes", "Pendientes, hasta que complete sus datos"];
+  const LLEGUE_PENDIENTES = ["Aquí espera sus datos", "En Pendientes, a esperar", "Listo, queda pendiente"];
+  const LLEGUE_SEMILLERO = ["Guardado en Semillero", "Ahí queda, para la próxima", "Listo, en el semillero"];
+  const LLEGUE_RESCATE = ["¡Bienvenido de vuelta!", "¡Ahí sí, en su nuevo lugar!", "Entregado, ¡qué alegría!", "¡Otra oportunidad, otro candidato!"];
   const AL_TOCAR = [
     "¡Hey, cosquillas!", "Aquí sigo, vigilando", "¿Buscas a alguien?", "¡Hola!", "¿Necesitas algo?", "Estoy trabajando, ¿eh?",
     "Tengo muchas hojas de vida por revisar", "¡Qué amable pasar a saludar!", "Shhh, estoy concentrada", "Si me ves dormida, solo descanso un ratito",
@@ -324,6 +339,15 @@
         if (vuelo.modo === "descartar") {
           reaccionar("angry", 12000, true, 7, "enojado");
           decir(azar(A_DESCARTADOS), 0, 1, 2600);
+        } else if (vuelo.modo === "rescatar") {
+          reaccionar("excited", 12000, false, 7, "feliz");
+          decir(azar(RESCATE), 0, 1, 3200);
+        } else if (vuelo.modo === "semillero") {
+          reaccionar("curious", 12000, false, 7);
+          decir(azar(A_SEMILLERO), 0, 1, 2800);
+        } else if (vuelo.modo === "pendiente") {
+          reaccionar("confused", 12000, false, 7);
+          decir(azar(A_PENDIENTES), 0, 1, 2800);
         } else {
           reaccionar("proud", 12000, false, 7, "feliz");
           decir(azar(A_ANALIZADOS), 0, 1, 2800);
@@ -342,7 +366,22 @@
     if (vuelo.fase !== "listo") return;
     untrack(() => {
       reaccionar("happy", 1200, false, 8, "feliz");
-      decir(azar(vuelo.modo === "descartar" ? LLEGUE_DESCARTADOS : LLEGUE_ANALIZADOS), 0, 1, 1400);
+      decir(
+        azar(
+          vuelo.modo === "descartar"
+            ? LLEGUE_DESCARTADOS
+            : vuelo.modo === "rescatar"
+              ? LLEGUE_RESCATE
+              : vuelo.modo === "semillero"
+                ? LLEGUE_SEMILLERO
+                : vuelo.modo === "pendiente"
+                  ? LLEGUE_PENDIENTES
+                  : LLEGUE_ANALIZADOS,
+        ),
+        0,
+        1,
+        1400,
+      );
     });
   });
 
@@ -819,6 +858,8 @@
   });
 
   $effect(() => {
+    // El color se lee una vez: para cambiarlo se vuelve a montar el componente ({#key}).
+    const definicion = { ...kirby, colors: { ...kirby.colors, body: untrack(() => color), eyes: "#ffffff" } };
     avatar = createAvatar(contenedor, {
       definition: definicion,
       defaultAnimation: "idle",

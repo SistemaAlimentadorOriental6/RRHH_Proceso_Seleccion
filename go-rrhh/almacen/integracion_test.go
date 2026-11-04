@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -48,8 +49,14 @@ func baseDePrueba(t *testing.T) *sql.DB {
 	if tablas != 0 {
 		t.Fatalf("la base de pruebas tiene %d tablas: use una base vacía y exclusiva para pruebas", tablas)
 	}
-	for _, archivo := range []string{"001_inicial.sql", "002_datos_para_leer.sql", "003_lectura.sql", "004_solicitud_datos.sql"} {
-		migracion, err := os.ReadFile("migraciones/" + archivo)
+	// Todas las migraciones, en orden: el programa exige columnas de todas (ver columnasNecesarias).
+	archivos, err := filepath.Glob("migraciones/*.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sort.Strings(archivos)
+	for _, archivo := range archivos {
+		migracion, err := os.ReadFile(archivo)
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -184,7 +184,41 @@ func cedulaSinEtiqueta(texto string) string {
 			return d
 		}
 	}
-	return ""
+	return cedulaSuelta(texto, valido)
+}
+
+var reTramoDigitos = regexp.MustCompile(`\d+`)
+
+// numeroAparte dice si el tramo de dígitos texto[ini:fin] está suelto: sin letras, @, + ni punto
+// pegados (que lo volverían parte de un correo, un decimal o un código).
+func numeroAparte(texto string, ini, fin int) bool {
+	if ini > 0 && strings.ContainsRune("@.+-_", rune(texto[ini-1])) || ini > 0 && isLetraASCII(texto[ini-1]) {
+		return false
+	}
+	return fin >= len(texto) || !(strings.ContainsRune("@_", rune(texto[fin])) || isLetraASCII(texto[fin]))
+}
+
+func isLetraASCII(b byte) bool { return b|0x20 >= 'a' && b|0x20 <= 'z' }
+
+// cedulaSuelta es la última pista, para hojas de vida que ponen el documento sin ningún rótulo (un
+// «1001138626» junto al correo y el celular). Solo se acepta si, descartados los teléfonos, queda un
+// único número: con dos candidatos no se puede saber cuál es, y mejor pedirla que consultar a otra persona.
+func cedulaSuelta(texto string, valido func(string) bool) string {
+	unico := ""
+	for _, loc := range reTramoDigitos.FindAllStringIndex(texto, -1) {
+		d := texto[loc[0]:loc[1]]
+		if len(d) < 8 || len(d) > 10 || !numeroAparte(texto, loc[0], loc[1]) {
+			continue
+		}
+		if !valido(d) || strings.HasPrefix(d, "0") { // un documento no empieza en 0
+			continue
+		}
+		if unico != "" && unico != d {
+			return ""
+		}
+		unico = d
+	}
+	return unico
 }
 
 var reCampoFormulario = regexp.MustCompile(`(?im)^[ \t]*(nombres?|email|correo|e-mail|area|mensaje|telefono|tel[eé]fono|celular|c[eé]dula)[ \t]{2,}(\S.*?)[ \t]*$`)

@@ -18,7 +18,7 @@ export class ErrorApi extends Error {
   }
 }
 
-async function pedirJson<T>(ruta: string, init?: RequestInit): Promise<T> {
+export async function pedirJson<T>(ruta: string, init?: RequestInit): Promise<T> {
   return (await pedirJsonConCabeceras<T>(ruta, init)).datos;
 }
 
